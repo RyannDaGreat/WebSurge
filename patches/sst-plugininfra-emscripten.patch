@@ -1,7 +1,10 @@
 # target: libs/sst/sst-plugininfra
 #
-# Emscripten support for sst-plugininfra: wasm is not x86 (no MXCSR, no cpuid)
-# and has no glibc <execinfo.h>. Upstreamable as-is.
+# Emscripten support for sst-plugininfra:
+#  - wasm is not x86 (no MXCSR, no cpuid)
+#  - no glibc <execinfo.h>
+#  - no shared object for dladdr to report a path for
+# Upstreamable as-is.
 diff --git a/src/cpufeatures.cpp b/src/cpufeatures.cpp
 index 4f99a7a..dca3bae 100644
 --- a/src/cpufeatures.cpp
@@ -90,3 +93,33 @@ index a9b5524..48fc641 100644
  
  std::string getLastSystemError() { return std::string(strerror(errno)); }
  } // namespace misc_platform
+diff --git a/src/paths_linux.cpp b/src/paths_linux.cpp
+index 9e37e5e..2da7333 100644
+--- a/src/paths_linux.cpp
++++ b/src/paths_linux.cpp
+@@ -36,6 +36,17 @@ fs::path homePath()
+ 
+ fs::path sharedLibraryBinaryPath()
+ {
++#if defined(__EMSCRIPTEN__)
++    /*
++     * Under Emscripten the engine is linked into the WebAssembly module itself;
++     * there is no shared object and dladdr has nothing to report. Callers use
++     * this only to derive an install directory to search for factory data, and
++     * a wasm host supplies that path explicitly instead. Returning a synthetic
++     * path at the filesystem root keeps parent_path() well defined rather than
++     * throwing during construction.
++     */
++    return fs::path{"/surge-xt.wasm"};
++#else
+     Dl_info info;
+     if (!dladdr(reinterpret_cast<const void *>(&sharedLibraryBinaryPath), &info) ||
+         !info.dli_fname[0])
+@@ -44,6 +55,7 @@ fs::path sharedLibraryBinaryPath()
+         throw std::runtime_error{"Failed to retrieve shared object file name"};
+     }
+     return fs::path{info.dli_fname};
++#endif
+ }
+ 
+ /*

@@ -99,16 +99,23 @@ extern "C"
 
     /*
      * Command. Creates the synth at the given sample rate.
+     *
+     * dataPath is where Surge should look for its factory resources inside the
+     * Emscripten filesystem (patches, wavetables, impulses). It must be passed
+     * explicitly: on the Linux code path Surge otherwise derives an install
+     * directory from its own shared-object location, which does not exist in a
+     * WebAssembly module. Pass "" only if no resources are mounted.
+     *
      * Returns 1 on success, 0 if already initialized.
      */
     EMSCRIPTEN_KEEPALIVE
-    int sh_init(float sampleRate)
+    int sh_init(float sampleRate, const char *dataPath)
     {
         if (gSynth)
             return 0;
 
         gLayer = std::make_unique<BrowserPluginLayer>();
-        gSynth = std::make_unique<SurgeSynthesizer>(gLayer.get());
+        gSynth = std::make_unique<SurgeSynthesizer>(gLayer.get(), dataPath ? dataPath : "");
         gSynth->setSamplerate(sampleRate);
 
         gCarryL.clear();
@@ -182,13 +189,22 @@ extern "C"
         return gScratch.c_str();
     }
 
-    /* Query. Normalized (0..1) value of a parameter by synth-side index. */
+    /*
+     * Query. Normalized (0..1) value of a parameter by synth-side index.
+     *
+     * The raw long-indexed overloads of get/setParameter01 are private; the
+     * public API is keyed by SurgeSynthesizer::ID, which fromSynthSideId builds.
+     * Going through ID is also what keeps us honest about invalid indices.
+     */
     EMSCRIPTEN_KEEPALIVE
     float sh_get_param(int index)
     {
         if (!gSynth)
             return 0.f;
-        return gSynth->getParameter01(index);
+        SurgeSynthesizer::ID id;
+        if (!gSynth->fromSynthSideId(index, id))
+            return 0.f;
+        return gSynth->getParameter01(id);
     }
 
     /* Command. Sets a parameter from a normalized (0..1) value. */
@@ -197,7 +213,10 @@ extern "C"
     {
         if (!gSynth)
             return;
-        gSynth->setParameter01(index, value, true);
+        SurgeSynthesizer::ID id;
+        if (!gSynth->fromSynthSideId(index, id))
+            return;
+        gSynth->setParameter01(id, value, true);
     }
 
     /*
