@@ -1,0 +1,92 @@
+# target: libs/sst/sst-plugininfra
+#
+# Emscripten support for sst-plugininfra: wasm is not x86 (no MXCSR, no cpuid)
+# and has no glibc <execinfo.h>. Upstreamable as-is.
+diff --git a/src/cpufeatures.cpp b/src/cpufeatures.cpp
+index 4f99a7a..dca3bae 100644
+--- a/src/cpufeatures.cpp
++++ b/src/cpufeatures.cpp
+@@ -13,8 +13,15 @@
+  */
+ #include "sst/plugininfra/cpufeatures.h"
+ 
+-#if defined(__SSE2__) || defined(_M_AMD64) || defined(_M_X64) ||                                   \
+-    (defined(_M_IX86_FP) && _M_IX86_FP >= 2) || defined(__i386__) || defined(__x86_64__)
++// Emscripten defines __SSE2__ when built with -msse2/-msimd128 because it emulates
++// the SSE *compute* intrinsics on top of WASM SIMD128. It does not, and cannot,
++// provide the x86 control-register surface: there is no MXCSR in WebAssembly, so
++// _mm_getcsr/_mm_setcsr/_MM_SET_ROUNDING_MODE do not exist, and cpuid has no
++// analogue. Treating wasm as x86 here therefore fails to compile. Fall through to
++// the generic (simde) path instead, which is exactly what the aarch64 build does.
++#if !defined(__EMSCRIPTEN__) &&                                                                    \
++    (defined(__SSE2__) || defined(_M_AMD64) || defined(_M_X64) ||                                  \
++     (defined(_M_IX86_FP) && _M_IX86_FP >= 2) || defined(__i386__) || defined(__x86_64__))
+ #if defined(_M_ARM64EC)
+ #include <intrin.h>
+ #else
+diff --git a/src/misc_linux.cpp b/src/misc_linux.cpp
+index a9b5524..48fc641 100644
+--- a/src/misc_linux.cpp
++++ b/src/misc_linux.cpp
+@@ -16,8 +16,15 @@
+ 
+ #include <stdio.h>
+ #include <cstdlib>
++#if defined(__EMSCRIPTEN__)
++// Emscripten has no glibc <execinfo.h>. It provides an equivalent through
++// emscripten_get_callstack(), which is used below.
++#include <emscripten/emscripten.h>
++#else
+ #include <execinfo.h>
++#endif
+ #include <string>
++#include <vector>
+ #include <sstream>
+ #include <iomanip>
+ #include <cstring>
+@@ -36,6 +43,37 @@ void allocateConsole() {}
+ 
+ std::string toOSCase(const std::string &text) { return text; }
+ 
++#if defined(__EMSCRIPTEN__)
++std::string stackTraceToString(int depth)
++{
++    // emscripten_get_callstack returns the number of bytes needed (including the
++    // NUL) when passed a null buffer, so size exactly then fill.
++    const int flags = EM_LOG_C_STACK | EM_LOG_DEMANGLE | EM_LOG_JS_STACK;
++    int needed = emscripten_get_callstack(flags, nullptr, 0);
++    if (needed <= 0)
++        return "-------- Stack Trace unavailable --------\n";
++
++    std::string raw(needed, '\0');
++    emscripten_get_callstack(flags, raw.data(), needed);
++    raw.resize(strlen(raw.c_str()));
++
++    // The emscripten callstack is newline separated; re-emit it in the same shape
++    // the native implementation below produces, honouring `depth`.
++    std::istringstream in(raw);
++    std::ostringstream oss;
++    std::string line;
++    std::vector<std::string> frames;
++    while (std::getline(in, line))
++        frames.push_back(line);
++
++    int shown = (depth < 0 || depth > (int)frames.size()) ? (int)frames.size() : depth;
++    oss << "-------- Stack Trace (" << shown << " frames of " << frames.size()
++        << " showing) --------\n";
++    for (int i = 1; i < shown; ++i)
++        oss << "   [" << std::setw(3) << i << "]: " << frames[i] << "\n";
++    return oss.str();
++}
++#else
+ std::string stackTraceToString(int depth)
+ {
+     void *callstack[128];
+@@ -52,6 +90,7 @@ std::string stackTraceToString(int depth)
+     free(strs);
+     return oss.str();
+ }
++#endif
+ 
+ std::string getLastSystemError() { return std::string(strerror(errno)); }
+ } // namespace misc_platform

@@ -15,13 +15,13 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-SURGE_DIR="${SURGE_WASM_SURGE_DIR:-$REPO_ROOT/vendor/surge}"
+SURGE_DIR="$REPO_ROOT/vendor/surge"
 SVG_DIR="$SURGE_DIR/resources/classic-skin-svgs"
 
 log() { printf '\033[1;36m==> %s\033[0m\n' "$*"; }
 die() { printf '\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 
-[ -d "$SURGE_DIR/src/common" ] || die "Surge source not at '$SURGE_DIR'. Run ./setup.sh first (or set SURGE_WASM_SURGE_DIR)."
+[ -d "$SURGE_DIR/src/common" ] || die "Surge source not at '$SURGE_DIR'. Run ./setup.sh first."
 [ -d "$SVG_DIR" ] || die "Classic skin SVGs not at '$SVG_DIR'."
 
 mkdir -p build src/skin

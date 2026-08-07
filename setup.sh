@@ -23,17 +23,15 @@ EMSDK_VERSION="6.0.0"
 SURGE_SHA="fae324266aed52d3bd03ef2c7fb68e9098ada961"
 SURGE_URL="https://github.com/surge-synthesizer/surge.git"
 
-# Both default to inside the dump, which is what keeps this portable: a fresh
-# checkout on any machine runs ./setup.sh and works with no configuration.
+# Everything lives inside the dump. No env overrides, no escape hatches.
 #
-# The override exists because on some hosts the dump lives on slow network or
-# object-backed storage (e.g. this Workbench, where /root is S3-backed), and a
-# 23-submodule clone of small files there takes hours. Point these at local
-# disk to build fast. They are toolchain/source caches only -- no build output
-# and nothing the website needs is stored there, so overriding them never
-# affects portability.
-EMSDK_DIR="${SURGE_WASM_EMSDK_DIR:-$REPO_ROOT/emsdk}"
-SURGE_DIR="${SURGE_WASM_SURGE_DIR:-$REPO_ROOT/vendor/surge}"
+# An earlier version of this script let these be pointed at /var/tmp "just for
+# speed" because /root is S3-backed on this host. That was wrong: the dump rule
+# is that Claude works strictly inside the dump, and portability is
+# non-negotiable. A build tree outside the dump is a build nobody else can
+# reproduce. If this storage is slow, it is slow -- correctness first.
+EMSDK_DIR="$REPO_ROOT/emsdk"
+SURGE_DIR="$REPO_ROOT/vendor/surge"
 
 log() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 die() { printf '\n\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
@@ -81,14 +79,55 @@ install_surge() {
     git -C "$SURGE_DIR" submodule update --init --recursive --depth 1
 
     log "Surge at $(git -C "$SURGE_DIR" rev-parse --short HEAD)"
+
+    apply_patches
+}
+
+# Surge and its submodules have no Emscripten target upstream, so a few platform
+# files need WASM branches. Those live in patches/ INSIDE the dump -- never as
+# loose edits in the clone -- so a fresh machine reproduces the build exactly.
+#
+# Idempotent: each patch is checked with --reverse before being applied, so
+# re-running setup.sh on an already-patched tree is a no-op rather than an error.
+apply_patches() {
+    shopt -s nullglob
+    local patches=("$REPO_ROOT/patches"/*.patch)
+    shopt -u nullglob
+
+    if [ ${#patches[@]} -eq 0 ]; then
+        log "No patches to apply"
+        return
+    fi
+
+    log "Applying ${#patches[@]} patch(es) to the Surge tree"
+    for p in "${patches[@]}"; do
+        # Each patch names the submodule it targets on its first line as
+        #   # target: <path relative to the Surge checkout>
+        local target
+        target="$(sed -n 's/^# target: //p' "$p" | head -1)"
+        [ -n "$target" ] || die "Patch '$p' has no '# target:' line."
+
+        local dir="$SURGE_DIR/$target"
+        [ -d "$dir" ] || die "Patch target '$dir' does not exist."
+
+        if git -C "$dir" apply --reverse --check "$p" 2>/dev/null; then
+            echo "  already applied: $(basename "$p")"
+        elif git -C "$dir" apply --check "$p" 2>/dev/null; then
+            git -C "$dir" apply "$p"
+            echo "  applied: $(basename "$p")"
+        else
+            die "Patch '$(basename "$p")' does not apply cleanly to $dir. The pinned Surge SHA may have moved."
+        fi
+    done
 }
 
 main() {
     case "${1:-all}" in
-        emsdk) install_emsdk ;;
-        surge) install_surge ;;
-        all)   install_emsdk; install_surge ;;
-        *)     die "Unknown target '$1'. Use: emsdk | surge | all" ;;
+        emsdk)   install_emsdk ;;
+        surge)   install_surge ;;
+        patches) apply_patches ;;
+        all)     install_emsdk; install_surge ;;
+        *)       die "Unknown target '$1'. Use: emsdk | surge | patches | all" ;;
     esac
 
     log "Setup complete."
