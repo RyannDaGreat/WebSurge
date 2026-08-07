@@ -6,19 +6,35 @@
 # HTTP even locally. This serves src/ -- which is the entire deliverable; there
 # is no backend and no build step at request time.
 #
-#   ./run_server.sh              serve on http://localhost:8080
-#   ./run_server.sh 9000         serve on a different port
+#   ./run_server.sh              http on :8080  (localhost only works for audio)
+#   ./run_server.sh --tls        https on :8080 (REQUIRED to use it over the LAN)
+#   ./run_server.sh --tls 9000   https on another port
+#
+# WHY --tls MATTERS: AudioWorklet exists only in a secure context. Browsers
+# treat http://localhost as secure, but a plain-http LAN address is not, so over
+# the LAN `AudioContext.audioWorklet` is undefined and the synth cannot start.
+# HTTPS (self-signed) makes the LAN address secure. Accept the browser warning
+# once per device.
 #
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_ROOT"
 
-PORT="${1:-8080}"
-WEB_ROOT="$REPO_ROOT/src"
-
 log() { printf '\033[1;36m==> %s\033[0m\n' "$*"; }
 die() { printf '\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
+
+TLS=0
+PORT=8080
+for arg in "$@"; do
+    case "$arg" in
+        --tls) TLS=1 ;;
+        ''|*[!0-9]*) die "Unknown argument '$arg'. Use: [--tls] [port]" ;;
+        *) PORT="$arg" ;;
+    esac
+done
+
+WEB_ROOT="$REPO_ROOT/src"
 
 # Fail loudly and specifically rather than serving a page that half-works. Each
 # of these has a different fix, so they are checked separately.
@@ -55,27 +71,36 @@ lan_ip() {
 
 IP="$(lan_ip || true)"
 
+if [ "$TLS" -eq 1 ]; then SCHEME=https; else SCHEME=http; fi
+
 log "Serving $WEB_ROOT"
 log "  engine   $(du -h "$WEB_ROOT/js/surge-engine.wasm" | cut -f1)"
 log "  patches  $PATCH_COUNT"
 log "  data     $(du -sh "$WEB_ROOT/data" 2>/dev/null | cut -f1)"
 echo
-printf '\033[1;32m   local   http://localhost:%s\033[0m\n' "$PORT"
+printf '\033[1;32m   local   %s://localhost:%s\033[0m\n' "$SCHEME" "$PORT"
 if [ -n "$IP" ]; then
-    printf '\033[1;32m   LAN     http://%s:%s\033[0m\n' "$IP" "$PORT"
+    printf '\033[1;32m   LAN     %s://%s:%s\033[0m\n' "$SCHEME" "$IP" "$PORT"
 else
     printf '\033[1;33m   LAN     (could not determine an address)\033[0m\n'
 fi
 echo
-echo "Click 'Start audio', then play with zxcvbnm,./ and qwertyuiop[]\\"
-echo "Ctrl-C to stop."
+
+if [ "$TLS" -eq 1 ]; then
+    echo "Self-signed certificate: the browser will warn once per device. Accept it."
+else
+    printf '\033[1;33mNOTE: plain HTTP. Audio will only work on localhost.\033[0m\n'
+    printf '\033[1;33m      Over the LAN, AudioWorklet needs a secure context: use --tls.\033[0m\n'
+fi
+echo "Play with zxcvbnm,./ and qwertyuiop[]\\ . Ctrl-C to stop."
 echo
 
-# Bound to 0.0.0.0 so the LAN address above actually works -- this serves a
+# Bound to 0.0.0.0 so the LAN address above actually works. This serves a
 # synthesizer on a trusted network, not anything sensitive, but it IS reachable
 # by anything that can route to this host.
 #
-# python3 -m http.server is single threaded, and the browser opens several
-# parallel requests (wasm, worklet, patch index, 142 SVGs). --protocol HTTP/1.1
-# keeps connections alive so those do not serialise painfully.
-exec python3 -m http.server "$PORT" --directory "$WEB_ROOT" --bind 0.0.0.0 --protocol HTTP/1.1
+# Served by tools/serve.py rather than `python3 -m http.server` because that has
+# no TLS option, and because a threading server matters here: the page opens
+# many parallel requests (wasm, worklet, patch index, 142 SVGs).
+exec uv run "$REPO_ROOT/tools/serve.py" \
+    --root "$WEB_ROOT" --port "$PORT" --bind 0.0.0.0 $([ "$TLS" -eq 1 ] && echo --tls)

@@ -70,6 +70,19 @@ class SurgeApp {
     this.ctx = new AudioContext();
     await this.ctx.resume();
 
+    // AudioWorklet is only exposed in a SECURE CONTEXT. Browsers treat
+    // http://localhost as secure but a plain-http LAN address as insecure, so
+    // over the LAN `audioWorklet` is simply undefined -- which otherwise
+    // surfaces as an opaque "Cannot read properties of undefined (reading
+    // 'addModule')". Say what is actually wrong and how to fix it.
+    if (!this.ctx.audioWorklet) {
+      throw new Error(
+        `AudioWorklet is unavailable because this page is not a secure context ` +
+        `(origin ${location.origin}). Serve over HTTPS -- run ./run_server.sh --tls -- ` +
+        `or open the site on http://localhost, which browsers treat as secure.`,
+      );
+    }
+
     setStatus('loading engine...');
     const [wasmBinary] = await Promise.all([
       fetch(ENGINE_WASM).then((r) => {
