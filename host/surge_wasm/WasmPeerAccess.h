@@ -36,6 +36,25 @@ bool renderIfDirty();
 /* Query. The front-most peer's backing image, or nullptr if there is none. */
 const juce::Image *frontImage();
 
+/*
+ * Command. Repaints every dirty peer. Returns true if any pixels changed.
+ *
+ * All peers, not just the front one: JUCE gives each popup menu and dialog its
+ * own peer, and they must all be up to date before compositing.
+ */
+bool renderAllDirty();
+
+/*
+ * Command. Flattens the whole peer stack, back to front, into an RGBA buffer.
+ *
+ * rgba must hold canvasW * canvasH * 4 bytes. Each peer is drawn at its own
+ * bounds and clipped to the canvas, so popups land where JUCE placed them.
+ */
+bool compositeInto (uint8_t *rgba, int canvasW, int canvasH);
+
+/* Query. How many peers exist. Changes when a menu opens or closes. */
+int peerCount();
+
 /* Command. Marks the whole front-most peer dirty. */
 void invalidateAll();
 

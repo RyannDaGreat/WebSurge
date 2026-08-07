@@ -20,16 +20,24 @@
  * JUCE tree, so it is reviewable and versioned here; patches/juce-emscripten.patch
  * only adds the three-line include hook.
  *
- * SINGLE WINDOW BY DESIGN
+ * MANY PEERS, ONE SURFACE
  * -----------------------
- * A browser tab is one surface. Desktop JUCE opens real OS windows for menus
- * and dialogs; here every peer draws into its own buffer and JS composites the
- * topmost one. Surge's popup menus are Components too, so they come along for
- * free as additional peers.
+ * A browser tab is one surface, but JUCE still creates a separate top-level
+ * Component -- and therefore a separate peer -- for every popup menu, tooltip
+ * and dialog. Each paints into its own image at its own screen bounds, and
+ * compositeInto() flattens the whole stack back-to-front into the single canvas
+ * buffer.
+ *
+ * An earlier version handed JS only the front-most peer's image. Opening any
+ * dropdown then replaced the entire editor with the menu, and because the menu's
+ * image is much smaller than the canvas, JS read past the end of it and smeared
+ * heap garbage across the top of the panel. Compositing the stack is not an
+ * optimisation here; it is the only correct behaviour.
  */
 
 #include <emscripten/emscripten.h>
 
+#include <cstring>
 #include <set>
 
 namespace juce
@@ -48,7 +56,17 @@ class WasmComponentPeer final : public ComponentPeer
         setBounds (comp.getBounds(), false);
     }
 
-    ~WasmComponentPeer() override { peers().removeFirstMatchingValue (this); }
+    ~WasmComponentPeer() override
+    {
+        peers().removeFirstMatchingValue (this);
+
+        // A closing popup leaves a hole in the composite. Nothing else knows to
+        // repaint that region, so mark every surviving peer fully dirty; without
+        // this the menu's pixels stay on screen after it closes.
+        for (auto *p : peers())
+            if (p != nullptr)
+                p->repaint (p->getBounds().withZeroOrigin());
+    }
 
     /* Query. All live peers, front-most last. */
     static Array<WasmComponentPeer *> &peers()
@@ -472,6 +490,80 @@ const juce::Image *frontImage()
         return nullptr;
     return &p->getImage();
 }
+
+bool compositeInto (uint8_t *rgba, int canvasW, int canvasH)
+{
+    if (rgba == nullptr || canvasW <= 0 || canvasH <= 0)
+        return false;
+
+    // Opaque black underneath: the editor covers the whole canvas, but starting
+    // from a known state means a peer that closes cannot leave its pixels behind.
+    std::memset (rgba, 0, (size_t) canvasW * canvasH * 4);
+
+    for (auto *p : juce::WasmComponentPeer::peers()) // back to front
+    {
+        if (p == nullptr || ! p->getImage().isValid())
+            continue;
+
+        auto &img = p->getImage();
+        const auto b = p->getBounds();
+
+        juce::Image::BitmapData src (img, juce::Image::BitmapData::readOnly);
+
+        const int x0 = juce::jmax (0, b.getX());
+        const int y0 = juce::jmax (0, b.getY());
+        const int x1 = juce::jmin (canvasW, b.getX() + img.getWidth());
+        const int y1 = juce::jmin (canvasH, b.getY() + img.getHeight());
+
+        for (int y = y0; y < y1; ++y)
+        {
+            const auto *s = src.getLinePointer (y - b.getY());
+            auto *d = rgba + ((size_t) y * canvasW + x0) * 4;
+
+            for (int x = x0; x < x1; ++x, d += 4)
+            {
+                const auto *px = s + (x - b.getX()) * 4;
+                // juce::Image::ARGB is BGRA in memory on little-endian, and is
+                // premultiplied -- so src-over is a plain add after scaling the
+                // destination, with no divide.
+                const uint32_t a = px[3];
+                if (a == 0)
+                    continue;
+
+                if (a == 255)
+                {
+                    d[0] = px[2];
+                    d[1] = px[1];
+                    d[2] = px[0];
+                    d[3] = 255;
+                }
+                else
+                {
+                    const uint32_t ia = 255 - a;
+                    d[0] = (uint8_t) (px[2] + ((d[0] * ia) / 255));
+                    d[1] = (uint8_t) (px[1] + ((d[1] * ia) / 255));
+                    d[2] = (uint8_t) (px[0] + ((d[2] * ia) / 255));
+                    d[3] = (uint8_t) (a + ((d[3] * ia) / 255));
+                }
+            }
+        }
+    }
+    return true;
+}
+
+bool renderAllDirty()
+{
+    bool any = false;
+    // Copy the list first: painting can create or destroy peers (a menu closing
+    // during its own repaint), and mutating while iterating would be undefined.
+    auto snapshot = juce::WasmComponentPeer::peers();
+    for (auto *p : snapshot)
+        if (juce::WasmComponentPeer::peers().contains (p) && p->renderIfDirty())
+            any = true;
+    return any;
+}
+
+int peerCount() { return juce::WasmComponentPeer::peers().size(); }
 
 void invalidateAll()
 {

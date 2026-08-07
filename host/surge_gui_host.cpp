@@ -53,6 +53,9 @@ std::unique_ptr<juce::AudioProcessorEditor> gEditor;
  */
 std::vector<uint8_t> gRgba;
 
+/* Peer count at the last frame; a change means a popup opened or closed. */
+int gLastPeerCount = 0;
+
 } // namespace
 
 extern "C"
@@ -108,30 +111,27 @@ extern "C"
 
         surgewasm::pumpMessages();
 
-        if (! surgewasm::renderIfDirty())
+        const bool painted = surgewasm::renderAllDirty();
+
+        // A menu opening or closing changes the stack without necessarily
+        // dirtying anything, so recomposite whenever the peer count moves.
+        const int peers = surgewasm::peerCount();
+        const bool stackChanged = (peers != gLastPeerCount);
+        gLastPeerCount = peers;
+
+        if (! painted && ! stackChanged)
             return 0;
 
-        const auto *img = surgewasm::frontImage();
-        if (img == nullptr)
+        // ALWAYS canvas-sized. The buffer must match what JS uploads: sizing it
+        // to the front peer instead is what let a small popup's image be read as
+        // if it were a full frame, smearing heap bytes across the panel.
+        const int w = gEditor->getWidth();
+        const int h = gEditor->getHeight();
+        if (w <= 0 || h <= 0)
             return 0;
 
-        const int w = img->getWidth();
-        const int h = img->getHeight();
         gRgba.resize ((size_t) w * h * 4);
-
-        juce::Image::BitmapData src (*img, juce::Image::BitmapData::readOnly);
-        for (int y = 0; y < h; ++y)
-        {
-            const auto *row = src.getLinePointer (y);
-            auto *dst = gRgba.data() + (size_t) y * w * 4;
-            for (int x = 0; x < w; ++x)
-            {
-                dst[x * 4 + 0] = row[x * 4 + 2]; // R <- B
-                dst[x * 4 + 1] = row[x * 4 + 1]; // G
-                dst[x * 4 + 2] = row[x * 4 + 0]; // B <- R
-                dst[x * 4 + 3] = row[x * 4 + 3]; // A
-            }
-        }
+        surgewasm::compositeInto (gRgba.data(), w, h);
         return 1;
     }
 
