@@ -6,15 +6,16 @@
 # HTTP even locally. This serves src/ -- which is the entire deliverable; there
 # is no backend and no build step at request time.
 #
-#   ./run_server.sh              http on :8080  (localhost only works for audio)
-#   ./run_server.sh --tls        https on :8080 (REQUIRED to use it over the LAN)
-#   ./run_server.sh --tls 9000   https on another port
+#   ./run_server.sh              https on :8080   (default)
+#   ./run_server.sh 9000         https on another port
+#   ./run_server.sh --no-tls     plain http -- audio then works ONLY on localhost
 #
-# WHY --tls MATTERS: AudioWorklet exists only in a secure context. Browsers
-# treat http://localhost as secure, but a plain-http LAN address is not, so over
-# the LAN `AudioContext.audioWorklet` is undefined and the synth cannot start.
-# HTTPS (self-signed) makes the LAN address secure. Accept the browser warning
-# once per device.
+# HTTPS IS THE DEFAULT because AudioWorklet exists only in a secure context.
+# Browsers treat http://localhost as secure, but a plain-http LAN address is
+# not, so over HTTP the LAN URL loads the page and then fails with
+# `AudioContext.audioWorklet` undefined. Serving TLS by default means the
+# address printed below always works. The certificate is self-signed, so accept
+# the browser warning once per device.
 #
 set -euo pipefail
 
@@ -24,12 +25,13 @@ cd "$REPO_ROOT"
 log() { printf '\033[1;36m==> %s\033[0m\n' "$*"; }
 die() { printf '\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 
-TLS=0
+TLS=1
 PORT=8080
 for arg in "$@"; do
     case "$arg" in
-        --tls) TLS=1 ;;
-        ''|*[!0-9]*) die "Unknown argument '$arg'. Use: [--tls] [port]" ;;
+        --no-tls) TLS=0 ;;
+        --tls)    TLS=1 ;;   # accepted but redundant; TLS is the default
+        ''|*[!0-9]*) die "Unknown argument '$arg'. Use: [--no-tls] [port]" ;;
         *) PORT="$arg" ;;
     esac
 done
@@ -89,8 +91,8 @@ echo
 if [ "$TLS" -eq 1 ]; then
     echo "Self-signed certificate: the browser will warn once per device. Accept it."
 else
-    printf '\033[1;33mNOTE: plain HTTP. Audio will only work on localhost.\033[0m\n'
-    printf '\033[1;33m      Over the LAN, AudioWorklet needs a secure context: use --tls.\033[0m\n'
+    printf '\033[1;33mNOTE: --no-tls. Audio will only work on localhost; over the LAN\033[0m\n'
+    printf '\033[1;33m      AudioWorklet needs a secure context and will be unavailable.\033[0m\n'
 fi
 echo "Play with zxcvbnm,./ and qwertyuiop[]\\ . Ctrl-C to stop."
 echo

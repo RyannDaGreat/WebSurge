@@ -78,7 +78,7 @@ class SurgeApp {
     if (!this.ctx.audioWorklet) {
       throw new Error(
         `AudioWorklet is unavailable because this page is not a secure context ` +
-        `(origin ${location.origin}). Serve over HTTPS -- run ./run_server.sh --tls -- ` +
+        `(origin ${location.origin}). Serve over HTTPS -- run ./run_server.sh, which serves HTTPS by default -- ` +
         `or open the site on http://localhost, which browsers treat as secure.`,
       );
     }

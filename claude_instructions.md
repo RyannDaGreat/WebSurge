@@ -65,13 +65,34 @@ Browser main thread                    Audio thread (AudioWorklet)
 
 - **Why compile Surge's engine rather than reimplement it?** Surge's sound *is*
   the project. Reimplementation is not on the table.
-- **Why not port the GUI itself (JUCE) to WASM?** Surge's GUI is JUCE-based.
-  JUCE has no supported Emscripten target; the community forks are unmaintained
-  and would drag in the full windowing/graphics stack. Critically, we do not
-  need it: Surge's layout is *data* (`SkinModel.cpp` connectors) and its
-  appearance is *data* (classic-skin SVGs). We generate the layout and render
-  the real assets natively in the browser. This is faithful — same coordinates,
-  same artwork — without JUCE.
+- **The GUI: port JUCE, do not reimplement it.**
+
+  *An earlier version of this manifest claimed "JUCE has no supported Emscripten
+  target" and used that to justify reimplementing the interface in DOM from the
+  skin assets. That claim was never tested and is **wrong**. The user's verdict
+  on the reimplementation was blunt and correct: it is not the original GUI.*
+
+  Measured facts, from compiling each module for wasm:
+
+  | Module | Errors |
+  | --- | --- |
+  | `juce_core` | 0 (after `patches/juce-emscripten.patch`) |
+  | `juce_events` | 0 |
+  | `juce_graphics` | 0 (with `-sUSE_FREETYPE=1`) |
+  | `juce_gui_basics` | 4, all missing *platform* types |
+
+  JUCE 8.0.12 already defines `JUCE_WASM` and ships
+  `juce_core/native/juce_SystemStats_wasm.cpp`. Upstream's wasm target is
+  **incomplete, not absent**.
+
+  JUCE rasterizes in software (`LowLevelGraphicsSoftwareRenderer`), so Surge's
+  GUI needs no OpenGL and no X11 to draw. The only missing piece is a
+  `ComponentPeer`: give `SurgeGUIEditor` a pixel buffer to paint into, blit it to
+  a `<canvas>`, and feed mouse/key events back. Those are Surge's own pixels —
+  real fonts, real menus, real LFO display, real hover states.
+
+  Prior art that this is viable: [Dreamtonics/juce_emscripten](https://github.com/Dreamtonics/juce_emscripten)
+  shipped a commercial product (Synthesizer V) this way, on a much older JUCE.
 - **Why CLAP rather than Surge's C++ classes directly?** `SurgeSynthesizer` is
   usable directly, but the CLAP surface already solves parameter enumeration,
   state save/load (which is how patches load), and event handling in a stable,
@@ -92,7 +113,7 @@ Browser main thread                    Audio thread (AudioWorklet)
 ./tools/gen_layout.sh             # src/layout.json + src/skin/ from Surge's skin model
 ./tools/stage_data.sh             # ~469 MB of patches/wavetables into src/data/
 uv run tools/gen_patch_index.py   # src/data/patches.json
-./run_server.sh                   # serve src/ ; prints the localhost AND LAN URL
+./run_server.sh                   # serve src/ over HTTPS; prints localhost + LAN URL
 ```
 
 Verification (never skip these — a compile is not evidence of sound):

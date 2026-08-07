@@ -99,7 +99,17 @@ def main(root, port=8080, bind="0.0.0.0", tls=False):
         raise SystemExit(f"No index.html in {root_path}")
 
     handler = functools.partial(Handler, directory=str(root_path))
-    httpd = http.server.ThreadingHTTPServer((bind, port), handler)
+    try:
+        httpd = http.server.ThreadingHTTPServer((bind, port), handler)
+    except OSError as err:
+        # EADDRINUSE is by far the most common failure here and the default
+        # traceback buries it under fifteen frames of fire/socketserver.
+        if err.errno == 98:
+            raise SystemExit(
+                f"Port {port} is already in use. Stop the other server, "
+                f"or pick another port: ./run_server.sh {port + 1}"
+            ) from None
+        raise
 
     if tls:
         ensure_cert()
