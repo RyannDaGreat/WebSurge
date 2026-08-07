@@ -43,6 +43,12 @@
 namespace juce
 {
 
+/*
+ * Supersampling factor: physical pixels per logical pixel. 1.0 is Surge's
+ * native 913x569. Drives both user zoom and HiDPI.
+ */
+float gRenderScale = 1.0f;
+
 //==============================================================================
 class WasmComponentPeer final : public ComponentPeer
 {
@@ -85,11 +91,7 @@ class WasmComponentPeer final : public ComponentPeer
             return;
 
         bounds = newBounds;
-        if (bounds.getWidth() > 0 && bounds.getHeight() > 0)
-        {
-            image = Image (Image::ARGB, bounds.getWidth(), bounds.getHeight(), true);
-            dirty = bounds.withZeroOrigin();
-        }
+        rebuildImageForScale();
         handleMovedOrResized();
     }
 
@@ -204,13 +206,24 @@ class WasmComponentPeer final : public ComponentPeer
         if (area.isEmpty())
             return false;
 
+        // `area` is logical; the image is physical. Expand outwards so a
+        // fractional scale never leaves a seam of stale pixels at the edge.
+        const auto phys = (area.toFloat() * gRenderScale).getSmallestIntegerContainer()
+                              .getIntersection ({ 0, 0, image.getWidth(), image.getHeight() });
+        if (phys.isEmpty())
+            return false;
+
         // Clear first: without it, translucent Surge widgets composite over the
         // previous frame and smear. Image::clear does this directly rather than
         // going through a Graphics fill, which would blend instead of replace.
-        image.clear (area, Colours::transparentBlack);
+        image.clear (phys, Colours::transparentBlack);
 
         LowLevelGraphicsSoftwareRenderer renderer (image);
-        renderer.clipToRectangle (area);
+        renderer.clipToRectangle (phys);
+        // Clip in physical, then scale so Surge keeps painting in logical
+        // coordinates -- this is what re-rasterizes the SVGs at full density
+        // instead of magnifying pixels.
+        renderer.addTransform (AffineTransform::scale (gRenderScale));
         handlePaint (renderer);
         return true;
     }
@@ -219,6 +232,25 @@ class WasmComponentPeer final : public ComponentPeer
 
     Image &getImage() { return image; }
     bool hasPendingPaint() const { return ! dirty.isEmpty(); }
+
+    /*
+     * Command. (Re)allocates the backing image at the current supersampling
+     * factor. Bounds stay logical; only the pixel buffer grows.
+     */
+    void rebuildImageForScale()
+    {
+        if (bounds.getWidth() <= 0 || bounds.getHeight() <= 0)
+            return;
+
+        const int pw = jmax (1, roundToInt (bounds.getWidth() * gRenderScale));
+        const int ph = jmax (1, roundToInt (bounds.getHeight() * gRenderScale));
+
+        if (image.isValid() && image.getWidth() == pw && image.getHeight() == ph)
+            return;
+
+        image = Image (Image::ARGB, pw, ph, true);
+        dirty = bounds.withZeroOrigin();
+    }
 
   private:
     Rectangle<int> bounds;
@@ -514,23 +546,28 @@ bool compositeInto (uint8_t *rgba, int canvasW, int canvasH)
             continue;
 
         auto &img = p->getImage();
-        const auto b = p->getBounds();
+
+        // Peer bounds are logical; the canvas and the peer's image are physical.
+        // Scale the origin to match, or peers land in the wrong place the moment
+        // the scale is not 1.
+        const int ox = juce::roundToInt (p->getBounds().getX() * juce::gRenderScale);
+        const int oy = juce::roundToInt (p->getBounds().getY() * juce::gRenderScale);
 
         juce::Image::BitmapData src (img, juce::Image::BitmapData::readOnly);
 
-        const int x0 = juce::jmax (0, b.getX());
-        const int y0 = juce::jmax (0, b.getY());
-        const int x1 = juce::jmin (canvasW, b.getX() + img.getWidth());
-        const int y1 = juce::jmin (canvasH, b.getY() + img.getHeight());
+        const int x0 = juce::jmax (0, ox);
+        const int y0 = juce::jmax (0, oy);
+        const int x1 = juce::jmin (canvasW, ox + img.getWidth());
+        const int y1 = juce::jmin (canvasH, oy + img.getHeight());
 
         for (int y = y0; y < y1; ++y)
         {
-            const auto *s = src.getLinePointer (y - b.getY());
+            const auto *s = src.getLinePointer (y - oy);
             auto *d = rgba + ((size_t) y * canvasW + x0) * 4;
 
             for (int x = x0; x < x1; ++x, d += 4)
             {
-                const auto *px = s + (x - b.getX()) * 4;
+                const auto *px = s + (x - ox) * 4;
                 // juce::Image::ARGB is BGRA in memory on little-endian, and is
                 // premultiplied -- so src-over is a plain add after scaling the
                 // destination, with no divide.
@@ -690,6 +727,34 @@ bool keyEvent (bool isDown, int keyCode, int textChar, bool shift, bool ctrl, bo
 
     return p->handleKeyPress (juce::KeyPress (keyCode, mods, (juce::juce_wchar) textChar));
 }
+
+/*
+ * Command. Sets the supersampling factor for every peer.
+ *
+ * NOT Desktop::setGlobalScaleFactor -- that leaves the peer's backing image at
+ * logical size, so the canvas ends up the same resolution and merely displayed
+ * smaller. Measured: at dpr 2 it gave a 913x569 buffer shown at 457x285 CSS
+ * pixels, i.e. blurrier than doing nothing.
+ *
+ * Instead JUCE stays entirely in logical coordinates -- layout, hit testing and
+ * popup fitting all keep working untouched -- and only the peer's image becomes
+ * physical, painted through a scale transform. Surge's SVG skin and its fonts
+ * are then genuinely re-rasterized at the higher density.
+ */
+void setScaleFactor (float scale)
+{
+    if (scale <= 0.0f || scale == juce::gRenderScale)
+        return;
+
+    juce::gRenderScale = scale;
+
+    // Each peer must reallocate at the new physical size.
+    for (auto *p : juce::WasmComponentPeer::peers())
+        if (p != nullptr)
+            p->rebuildImageForScale();
+}
+
+float getScaleFactor() { return juce::gRenderScale; }
 
 void setDisplaySize (int width, int height)
 {

@@ -24,6 +24,7 @@
 
 #include <emscripten/emscripten.h>
 
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -94,13 +95,31 @@ extern "C"
         return 1;
     }
 
-    /* Query. Editor width in pixels, as Surge itself sized it. */
+    /* Query. Editor width in LOGICAL pixels, as Surge itself sized it. */
     EMSCRIPTEN_KEEPALIVE
     int sgui_width() { return gEditor ? gEditor->getWidth() : 0; }
 
-    /* Query. Editor height in pixels. */
+    /* Query. Editor height in LOGICAL pixels. */
     EMSCRIPTEN_KEEPALIVE
     int sgui_height() { return gEditor ? gEditor->getHeight() : 0; }
+
+    /*
+     * Query. Canvas size in PHYSICAL pixels -- logical size times the render
+     * scale. This is what the canvas backing store must be, and how many bytes
+     * sgui_pixels() holds. Confusing it with the logical size is the classic
+     * HiDPI bug in both directions.
+     */
+    EMSCRIPTEN_KEEPALIVE
+    int sgui_canvas_width()
+    {
+        return gEditor ? (int) lround (gEditor->getWidth() * surgewasm::getScaleFactor()) : 0;
+    }
+
+    EMSCRIPTEN_KEEPALIVE
+    int sgui_canvas_height()
+    {
+        return gEditor ? (int) lround (gEditor->getHeight() * surgewasm::getScaleFactor()) : 0;
+    }
 
     /*
      * Command. Pumps JUCE's timers/messages and repaints if anything is dirty.
@@ -130,8 +149,8 @@ extern "C"
         // ALWAYS canvas-sized. The buffer must match what JS uploads: sizing it
         // to the front peer instead is what let a small popup's image be read as
         // if it were a full frame, smearing heap bytes across the panel.
-        const int w = gEditor->getWidth();
-        const int h = gEditor->getHeight();
+        const int w = sgui_canvas_width();
+        const int h = sgui_canvas_height();
         if (w <= 0 || h <= 0)
             return 0;
 
@@ -143,6 +162,30 @@ extern "C"
     /* Query. Pointer to the RGBA buffer filled by sgui_render. */
     EMSCRIPTEN_KEEPALIVE
     uint8_t *sgui_pixels() { return gRgba.data(); }
+
+    /*
+     * Command. Sets the rendering scale: user zoom multiplied by device pixel
+     * ratio. 1.0 is Surge's native 913x569.
+     *
+     * The editor's reported size changes with this, so JS must resize the canvas
+     * to sgui_width()/sgui_height() afterwards.
+     */
+    EMSCRIPTEN_KEEPALIVE
+    void sgui_set_scale (float scale)
+    {
+        if (! gEditor || scale <= 0.0f)
+            return;
+
+        surgewasm::setScaleFactor (scale);
+
+        // The display must track the scaled canvas, or popup menus get fitted to
+        // the wrong bounds and land off-screen again.
+        surgewasm::setDisplaySize (gEditor->getWidth(), gEditor->getHeight());
+    }
+
+    /* Query. The current rendering scale. */
+    EMSCRIPTEN_KEEPALIVE
+    float sgui_get_scale() { return surgewasm::getScaleFactor(); }
 
     /* Command. Forces a full repaint. */
     EMSCRIPTEN_KEEPALIVE

@@ -68,6 +68,17 @@ void wheelEvent (float x, float y, float deltaX, float deltaY, bool shift, bool 
 bool keyEvent (bool isDown, int keyCode, int textChar, bool shift, bool ctrl, bool alt);
 
 /*
+ * Command. Sets the global rendering scale.
+ *
+ * Drives both user zoom and HiDPI. JUCE re-rasterizes the component tree at the
+ * new scale, so Surge's SVG skin stays sharp instead of being upscaled.
+ */
+void setScaleFactor (float scale);
+
+/* Query. The current global rendering scale. */
+float getScaleFactor();
+
+/*
  * Command. Tells JUCE how big the canvas is.
  *
  * Must match the canvas exactly: JUCE fits popup menus to the display, so an

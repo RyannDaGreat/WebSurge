@@ -539,3 +539,52 @@ startup" documented behaviour the code did not have.**
 and the factory came back uncallable. The harness now evaluates it with a
 CommonJS-shaped scope. The browser path was never affected — the worklet bundle
 concatenates the glue as a plain script rather than importing it.
+
+### Zoom and HiDPI — and a regression caught before shipping
+
+User: "Surge is vector graphics lol why not make it resizable" and "why not
+render at retina resolution? Can we have control for that on by default".
+
+Both correct, and both the same mechanism: the classic skin is SVG and JUCE
+rasterizes in software, so there is no fixed-resolution artwork to fight.
+
+**First attempt was wrong and would have shipped a regression.**
+`Desktop::setGlobalScaleFactor(2)` reported scale 2, but measurement showed the
+editor still 913x569 with the canvas CSS-sized to 457x285 — the same pixel count
+displayed smaller, i.e. *blurrier than doing nothing*. Global scale does not
+change a peer's backing resolution. Caught only because the check printed the
+backing store and CSS size rather than trusting the reported scale.
+
+`ComponentPeer::getPlatformScaleFactor()` is not the hook either — grep shows it
+is consulted only by drag-and-drop and a notifier, never the paint path.
+
+**What actually works:** keep JUCE entirely in logical coordinates so layout, hit
+testing and popup fitting are untouched, and make only the peer's backing image
+physical:
+
+- `gRenderScale` = physical pixels per logical pixel.
+- `rebuildImageForScale()` allocates the image at `bounds * scale`.
+- `renderIfDirty()` clips in physical, then `addTransform(scale)` so Surge keeps
+  painting in logical units — that is what re-rasterizes the SVGs and re-hints
+  the fonts instead of magnifying pixels.
+- `compositeInto()` scales each peer's origin, or popups land in the wrong place
+  at any scale != 1.
+- Canvas backing = physical, CSS size = logical x user zoom (**not** x dpr, or a
+  retina display shrinks the panel instead of sharpening it).
+- `pos()` in gui-app.js divides by the scale: canvas pixels are physical, JUCE
+  wants logical. Without it every click is offset by the scale factor.
+
+Verified: dpr 2 gives a 1826x1138 backing store at 913x569 CSS, visibly crisp,
+and clicking Scene B hits parameter 5 at dpr1@100%, dpr2@100% and dpr2@200%.
+
+**Lesson: "the API reports the value I set" is not evidence the thing works.
+Measure the observable — here, the backing store and the CSS size.**
+
+### Why the Category / Patch jog buttons do nothing
+
+Not a GUI bug. Those walk **Surge's own** patch database, populated by scanning
+its data path. The wasm filesystem root is `tmp/ home/ dev/ proc` and
+`/SurgeXTData` is MISSING — Surge has zero patches registered. The sidebar works
+because it is a separate JS index that fetches `.fxp` files on demand; Surge
+itself has never been told those patches exist. Same root cause as the unmounted
+wavetables. Not yet fixed.

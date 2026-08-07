@@ -75,6 +75,23 @@ header h1 {
 }
 
 #status { color: var(--dim); font-size: var(--font-small); flex: 1; }
+
+.ctl {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-xs);
+  font-size: var(--font-small);
+  color: var(--dim);
+}
+.ctl select {
+  background: var(--row);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--gap-xs);
+  font-size: var(--font-small);
+}
+#scale-info { color: var(--accent); font-size: var(--font-small); }
 #kb-state { color: var(--accent); font-size: var(--font-small); }
 .warn { color: var(--warn); font-size: var(--font-small); }
 

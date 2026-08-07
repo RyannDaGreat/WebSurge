@@ -102,19 +102,23 @@ class SurgeGuiApp {
       paramCount: c('sgui_param_count', 'number', []),
       readParams: c('sgui_read_params', null, ['number']),
       loadPatch: c('sgui_load_patch_path', 'number', ['string', 'string']),
+      setScale: c('sgui_set_scale', null, ['number']),
+      getScale: c('sgui_get_scale', 'number', []),
+      canvasWidth: c('sgui_canvas_width', 'number', []),
+      canvasHeight: c('sgui_canvas_height', 'number', []),
     };
 
     if (!this.sg.init()) throw new Error('sgui_init failed -- the editor was not created');
 
-    const w = this.sg.width();
-    const h = this.sg.height();
-    if (w <= 0 || h <= 0) throw new Error(`Editor reported a zero size (${w}x${h})`);
-
     this.canvas = $('surge-canvas');
-    this.canvas.width = w;
-    this.canvas.height = h;
     this.ctx2d = this.canvas.getContext('2d', { alpha: false });
-    this.imageData = this.ctx2d.createImageData(w, h);
+
+    // HiDPI on by default: render at the device's real pixel density so Surge's
+    // SVG skin is re-rasterized sharp rather than upscaled.
+    this.retina = true;
+    this.zoom = 1.0;
+    this.scale = 1.0;
+    this.applyScale();
 
     this.paramCount = this.sg.paramCount();
     this.paramPtr = M._malloc(this.paramCount * 4);
@@ -124,9 +128,56 @@ class SurgeGuiApp {
     this.sg.invalidate();
     requestAnimationFrame(() => this.frame());
 
-    setStatus(`Surge GUI ${w}x${h}, ${this.paramCount} parameters`);
-    return { w, h };
+    setStatus(`Surge GUI ${this.canvas.width}x${this.canvas.height}, ${this.paramCount} parameters`);
+    return { w: this.canvas.width, h: this.canvas.height };
   }
+
+  /**
+   * Command. Applies zoom x device-pixel-ratio and resizes the canvas to match.
+   *
+   * Two different sizes are in play and conflating them is the classic HiDPI
+   * bug: the canvas BACKING STORE is physical pixels (what Surge renders), while
+   * the CSS size is logical pixels (what the page lays out). Setting only the
+   * former gives a huge canvas; only the latter gives a blurry one.
+   *
+   * Mouse mapping needs no change -- pos() already scales through
+   * getBoundingClientRect, so it converts CSS pixels to canvas pixels for free.
+   */
+  applyScale() {
+    const dpr = this.retina ? (window.devicePixelRatio || 1) : 1;
+    const scale = this.zoom * dpr;
+
+    this.sg.setScale(scale);
+
+    // Logical: Surge's own coordinate space, and what CSS lays out.
+    // Physical: what Surge actually rasterizes and what the canvas stores.
+    const logicalW = this.sg.width();
+    const logicalH = this.sg.height();
+    const physW = this.sg.canvasWidth();
+    const physH = this.sg.canvasHeight();
+    if (physW <= 0 || physH <= 0) {
+      throw new Error(`Editor reported a zero size (${physW}x${physH})`);
+    }
+
+    this.scale = scale;
+    this.canvas.width = physW;
+    this.canvas.height = physH;
+    // CSS size is the logical size scaled by user zoom only -- NOT by dpr, or a
+    // retina display would shrink the panel instead of sharpening it.
+    this.canvas.style.width = `${Math.round(logicalW * this.zoom)}px`;
+    this.canvas.style.height = `${Math.round(logicalH * this.zoom)}px`;
+    this.imageData = this.ctx2d.createImageData(physW, physH);
+
+    this.sg.invalidate();
+    $('scale-info').textContent =
+      `${Math.round(this.zoom * 100)}%${dpr !== 1 ? ` · ${dpr}x HiDPI` : ''} — ${physW}×${physH}`;
+  }
+
+  /** Command. Sets user zoom (1.0 = Surge's native size) and re-lays out. */
+  setZoom(zoom) { this.zoom = zoom; this.applyScale(); }
+
+  /** Command. Turns HiDPI rendering on or off and re-lays out. */
+  setRetina(on) { this.retina = on; this.applyScale(); }
 
   /**
    * Command. One animation frame: repaint if dirty, then mirror parameters.
@@ -168,11 +219,15 @@ class SurgeGuiApp {
 
     // Canvas CSS size may differ from its pixel size on a scaled display, so
     // map through the bounding rect rather than assuming 1:1.
+    // Canvas pixels are PHYSICAL; JUCE works in LOGICAL coordinates. Dividing by
+    // the render scale is what keeps clicks landing on the right control once
+    // zoom or HiDPI is on -- without it every hit is offset by the scale factor.
     const pos = (e) => {
       const r = cv.getBoundingClientRect();
+      const s = this.scale || 1;
       return [
-        (e.clientX - r.left) * (cv.width / r.width),
-        (e.clientY - r.top) * (cv.height / r.height),
+        ((e.clientX - r.left) * (cv.width / r.width)) / s,
+        ((e.clientY - r.top) * (cv.height / r.height)) / s,
       ];
     };
     const mods = (e) => [e.shiftKey ? 1 : 0, e.ctrlKey ? 1 : 0, e.altKey ? 1 : 0];
@@ -304,6 +359,16 @@ async function main() {
       fail('Could not start Surge', err);
       $('start-btn').disabled = false;
     }
+  });
+
+  $('zoom-select').addEventListener('change', (e) => {
+    try { app.setZoom(parseFloat(e.target.value)); }
+    catch (err) { fail('Could not change zoom', err); }
+  });
+
+  $('retina-toggle').addEventListener('change', (e) => {
+    try { app.setRetina(e.target.checked); }
+    catch (err) { fail('Could not change HiDPI setting', err); }
   });
 
   $('panic-btn').addEventListener('click', () =>
