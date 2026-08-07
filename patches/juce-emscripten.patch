@@ -1,12 +1,81 @@
 # target: libs/JUCE
 #
 # Emscripten/WASM support for JUCE 8.0.12.
-#  - juce_SystemStats_wasm.cpp never includes <emscripten.h>
-#  - the thread priority table has no WASM entries, so it is zero-length and
-#    fails its own static_assert
-#  - juce_gui_basics.cpp has no JUCE_WASM branch in its platform #elif chain;
-#    the hook points at host/surge_wasm/, which lives in the dump so the
-#    ComponentPeer stays reviewable rather than buried in a vendor patch.
+# JUCE 8 defines JUCE_WASM and ships juce_SystemStats_wasm.cpp, but the target is
+# incomplete. This adds: emscripten.h include, WASM thread-priority entries,
+# wasm-before-linux platform detection (host projects define LINUX), the WASM
+# branches in juce_core/juce_events/juce_graphics/juce_gui_basics pointing at
+# host/surge_wasm/, NativeImageType for wasm, a PluginHostType case, a
+# PropertiesFile case, and narrowing a posix guard so updateStatInfoForFile
+# stays available. Upstreamable.
+diff --git a/modules/juce_audio_processors/utilities/juce_PluginHostType.cpp b/modules/juce_audio_processors/utilities/juce_PluginHostType.cpp
+index 7ce6bf5..e96ffde 100644
+--- a/modules/juce_audio_processors/utilities/juce_PluginHostType.cpp
++++ b/modules/juce_audio_processors/utilities/juce_PluginHostType.cpp
+@@ -319,6 +319,9 @@ PluginHostType::HostType PluginHostType::getHostType()
+ 
+    #elif JUCE_IOS
+    #elif JUCE_ANDROID
++   #elif JUCE_WASM
++    // A browser has no host application to identify, so UnknownHost is
++    // the right answer -- same as the iOS and Android cases above.
+    #else
+     #error
+    #endif
+diff --git a/modules/juce_core/juce_core.cpp b/modules/juce_core/juce_core.cpp
+index 076f283..f78009a 100644
+--- a/modules/juce_core/juce_core.cpp
++++ b/modules/juce_core/juce_core.cpp
+@@ -268,6 +268,28 @@
+ 
+ //==============================================================================
+ #elif JUCE_WASM
++ // Emscripten is POSIX over MEMFS, so the Linux file and thread backends
++ // apply unchanged -- the same reuse the BSD branch above relies on.
++ // Without these, File, Thread and Process have no implementation at all
++ // and the link fails on juce::File::isSymbolicLink and friends.
++ // juce_BasicNativeHeaders.h brings these in for Linux but not for wasm,
++ // and juce_CommonFile_linux.cpp needs both.
++ #include <dirent.h>
++ #include <fnmatch.h>
++ // Our own file backend, not juce_Files_linux.cpp: that one needs
++ // juce_getExecutableFile and the memory-mapping code which upstream
++ // already excludes for wasm in juce_SharedCode_posix.h. It must come
++ // FIRST: it also restores updateStatInfoForFile, which the directory
++ // iterator below calls and which lives in that same excluded block.
++ #include <surge_wasm/juce_Files_wasm.cpp>
++ // Directory iteration is plain opendir/readdir and works over MEMFS.
++ #include "native/juce_CommonFile_linux.cpp"
++ // Not juce_Network_linux.cpp: it needs ifaddrs and poll, absent from the
++ // Emscripten sysroot. A page cannot open raw sockets at all, so this
++ // supplies cleanly-failing implementations instead.
++ #include <surge_wasm/juce_Network_wasm.cpp>
++ // Threads_linux is fine as-is: Emscripten implements pthreads.
++ #include "native/juce_Threads_linux.cpp"
+  #include "native/juce_SystemStats_wasm.cpp"
+  #include "native/juce_PlatformTimer_generic.cpp"
+ #endif
+diff --git a/modules/juce_core/native/juce_SharedCode_posix.h b/modules/juce_core/native/juce_SharedCode_posix.h
+index 75bb4f2..fc8fa79 100644
+--- a/modules/juce_core/native/juce_SharedCode_posix.h
++++ b/modules/juce_core/native/juce_SharedCode_posix.h
+@@ -203,6 +203,8 @@ namespace
+ 
+         return statfs (f.getFullPathName().toUTF8(), &result) == 0;
+     }
++   #endif // ! JUCE_WASM -- only juce_doStatFS needs statfs; what follows
++          // is plain stat() and is required by the wasm build.
+ 
+    #if JUCE_MAC || JUCE_IOS
+     static int64 getCreationTime (const juce_statStruct& s) noexcept     { return (int64) s.st_birthtime; }
+@@ -227,7 +229,6 @@ namespace
+         if (isReadOnly != nullptr)
+             *isReadOnly = access (path.toUTF8(), W_OK) != 0;
+     }
+-   #endif
+ 
+     Result getResultForErrno()
+     {
 diff --git a/modules/juce_core/native/juce_SystemStats_wasm.cpp b/modules/juce_core/native/juce_SystemStats_wasm.cpp
 index 803a74f..cb45def 100644
 --- a/modules/juce_core/native/juce_SystemStats_wasm.cpp
@@ -45,6 +114,100 @@ index 6f63365..0a1ec4a 100644
      };
  
      static_assert (std::size (table) == 5,
+diff --git a/modules/juce_core/system/juce_TargetPlatform.h b/modules/juce_core/system/juce_TargetPlatform.h
+index e6e7fe1..838823b 100644
+--- a/modules/juce_core/system/juce_TargetPlatform.h
++++ b/modules/juce_core/system/juce_TargetPlatform.h
+@@ -77,6 +77,12 @@
+   #define       JUCE_ANDROID 1
+ #elif defined (__FreeBSD__) || defined (__OpenBSD__)
+   #define       JUCE_BSD 1
++// Emscripten must be tested BEFORE Linux. Host projects (Surge among them)
++// commonly define LINUX as their own platform macro, which would otherwise
++// select JUCE_LINUX under emcc and pull in sys/prctl.h, sys/vfs.h and X11,
++// none of which exist in the Emscripten sysroot.
++#elif defined (__EMSCRIPTEN__) || defined (__wasm__)
++  #define       JUCE_WASM 1
+ #elif defined (LINUX) || defined (__linux__)
+   #define       JUCE_LINUX 1
+ #elif defined (__APPLE_CPP__) || defined (__APPLE_CC__)
+diff --git a/modules/juce_core/threads/juce_Thread.h b/modules/juce_core/threads/juce_Thread.h
+index 71baab4..6657ff1 100644
+--- a/modules/juce_core/threads/juce_Thread.h
++++ b/modules/juce_core/threads/juce_Thread.h
+@@ -604,7 +604,9 @@ private:
+     std::atomic<bool> shouldExit { false };
+     ThreadSafeListenerList<Listener> listeners;
+ 
+-   #if JUCE_ANDROID || JUCE_LINUX || JUCE_BSD
++   // JUCE_WASM included because we compile juce_Threads_linux.cpp for
++   // Emscripten, and that backend reads and writes this member.
++   #if JUCE_ANDROID || JUCE_LINUX || JUCE_BSD || JUCE_WASM
+     std::atomic<Priority> priority;
+    #endif
+ 
+diff --git a/modules/juce_data_structures/app_properties/juce_PropertiesFile.cpp b/modules/juce_data_structures/app_properties/juce_PropertiesFile.cpp
+index 749e8b8..a9370a6 100644
+--- a/modules/juce_data_structures/app_properties/juce_PropertiesFile.cpp
++++ b/modules/juce_data_structures/app_properties/juce_PropertiesFile.cpp
+@@ -98,7 +98,9 @@ File PropertiesFile::Options::getDefaultFile() const
+     if (folderName.isNotEmpty())
+         dir = dir.getChildFile (folderName);
+ 
+-   #elif JUCE_LINUX || JUCE_BSD || JUCE_ANDROID
++   // JUCE_WASM uses the same form: Emscripten maps ~ to /home/web_user,
++   // which exists in MEMFS from startup.
++   #elif JUCE_LINUX || JUCE_BSD || JUCE_ANDROID || JUCE_WASM
+     auto dir = File (commonToAllUsers ? "/var" : "~")
+                       .getChildFile (folderName.isNotEmpty() ? folderName
+                                                              : ("." + applicationName));
+diff --git a/modules/juce_events/juce_events.cpp b/modules/juce_events/juce_events.cpp
+index 7961481..69f55f6 100644
+--- a/modules/juce_events/juce_events.cpp
++++ b/modules/juce_events/juce_events.cpp
+@@ -105,6 +105,11 @@
+  #include "native/juce_EventLoopInternal_linux.h"
+  #include "native/juce_Messaging_linux.cpp"
+ 
++#elif JUCE_WASM
++ // Lives in the dump, not the vendor tree; build.sh puts host/ on the
++ // include path. See the file for why a browser needs its own queue.
++ #include <surge_wasm/juce_Messaging_wasm.cpp>
++
+ #elif JUCE_ANDROID
+  #include "native/juce_Messaging_android.cpp"
+ 
+diff --git a/modules/juce_graphics/images/juce_Image.cpp b/modules/juce_graphics/images/juce_Image.cpp
+index 2aef206..8e6cfd8 100644
+--- a/modules/juce_graphics/images/juce_Image.cpp
++++ b/modules/juce_graphics/images/juce_Image.cpp
+@@ -641,7 +641,9 @@ int NativeImageType::getTypeID() const
+     return 1;
+ }
+ 
+-#if JUCE_LINUX || JUCE_BSD
++// JUCE_WASM too: everything renders in software in a browser, so the
++// software pixel data below is exactly the right native image type.
++#if JUCE_LINUX || JUCE_BSD || JUCE_WASM
+ ImagePixelData::Ptr NativeImageType::create (Image::PixelFormat format, int width, int height, bool clearImage) const
+ {
+     return new SoftwarePixelData (format, width, height, clearImage);
+diff --git a/modules/juce_graphics/juce_graphics.cpp b/modules/juce_graphics/juce_graphics.cpp
+index 8a0c748..a6bf975 100644
+--- a/modules/juce_graphics/juce_graphics.cpp
++++ b/modules/juce_graphics/juce_graphics.cpp
+@@ -240,6 +240,11 @@ extern "C"
+  #include "native/juce_Direct2DImage_windows.cpp"
+  #include "native/juce_Direct2DMetrics_windows.cpp"
+ 
++#elif JUCE_WASM
++ // No fontconfig and no system fonts in a browser; Surge embeds its own.
++ #include <surge_wasm/juce_Fonts_wasm.cpp>
++ #include "native/juce_IconHelpers_linux.cpp"
++
+ #elif JUCE_LINUX || JUCE_BSD
+  #include "native/juce_Fonts_linux.cpp"
+  #include "native/juce_IconHelpers_linux.cpp"
 diff --git a/modules/juce_gui_basics/juce_gui_basics.cpp b/modules/juce_gui_basics/juce_gui_basics.cpp
 index 1ee4e70..f721e6f 100644
 --- a/modules/juce_gui_basics/juce_gui_basics.cpp

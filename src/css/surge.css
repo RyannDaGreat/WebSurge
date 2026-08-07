@@ -114,6 +114,19 @@ main {
 
 /* ---- the synth panel ---- */
 
+/* The canvas Surge paints itself into. Its pixel size comes from the editor at
+   runtime; no CSS size is set, so one canvas pixel is one Surge pixel and hit
+   testing needs no scaling correction. */
+#surge-canvas {
+  display: block;
+  box-shadow: var(--shadow);
+  /* A canvas is focusable here so it can receive keys, but the focus ring would
+     sit awkwardly over Surge's own chrome. */
+  outline: none;
+  touch-action: none;
+  cursor: default;
+}
+
 #panel {
   position: relative;
   width: var(--panel-w);

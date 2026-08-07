@@ -30,6 +30,8 @@
 
 #include <emscripten/emscripten.h>
 
+#include <set>
+
 namespace juce
 {
 
@@ -326,4 +328,249 @@ MouseCursor::StandardCursorType MouseCursor::PlatformSpecificHandle::currentCurs
 //==============================================================================
 bool WindowUtils::areThereAnyAlwaysOnTopWindows() { return false; }
 
+//==============================================================================
+/*
+ * Keys currently held.
+ *
+ * JUCE asks the OS on other platforms; a browser only tells us about
+ * transitions, so the peer keeps the set itself. Surge queries this for
+ * modifier-style behaviour (ctrl-drag for fine adjustment, and so on), and
+ * getting it wrong means those gestures silently stop working.
+ */
+std::set<int> &heldKeys()
+{
+    static std::set<int> keys;
+    return keys;
+}
+
+bool KeyPress::isKeyCurrentlyDown (int keyCode)
+{
+    return heldKeys().count (keyCode) > 0;
+}
+
+//==============================================================================
+/*
+ * There are no OS file icons to fetch in a browser. Returning a null Image is
+ * what JUCE's file browser expects when a platform cannot supply one; it falls
+ * back to its own generic file/folder glyphs.
+ */
+Image detail::WindowingHelpers::createIconForFile (const File &) { return {}; }
+
+/*
+ * Message boxes go through JUCE's own AlertWindow rather than anything native.
+ * That is not a compromise here -- AlertWindow is a juce::Component, so it
+ * renders through this very peer and looks exactly as it does on the desktop,
+ * and unlike a native dialog it cannot block the browser's event loop.
+ */
+std::unique_ptr<detail::ScopedMessageBoxInterface>
+detail::ScopedMessageBoxInterface::create (const MessageBoxOptions &options)
+{
+    return detail::AlertWindowHelpers::create (options);
+}
+
+/*
+ * The system "beep". A page has no access to one, and synthesising a tone here
+ * would be actively wrong in a synthesizer -- it would come out of the same
+ * speakers as the instrument.
+ */
+void LookAndFeel::playAlertSound() {}
+
+//==============================================================================
+/*
+ * Clipboard.
+ *
+ * The browser's async Clipboard API cannot satisfy JUCE's synchronous
+ * getTextFromClipboard(), and reading the real clipboard requires a permission
+ * prompt. So we keep an internal clipboard that works perfectly for copy/paste
+ * *within* Surge -- which is what it is actually used for here (copying
+ * modulation routings, patch comments, tuning data) -- and additionally push
+ * copies out to the system clipboard on a best-effort basis so that pasting
+ * into another application works.
+ */
+static String &internalClipboard()
+{
+    static String text;
+    return text;
+}
+
+void SystemClipboard::copyTextToClipboard (const String &text)
+{
+    internalClipboard() = text;
+
+    // Best effort: fails silently if the page lacks permission, which is why
+    // the internal copy above is the one Surge actually reads back.
+    EM_ASM ({
+        const s = UTF8ToString ($0);
+        if (globalThis.navigator && navigator.clipboard)
+            navigator.clipboard.writeText (s).catch (() => {});
+    }, text.toRawUTF8());
+}
+
+String SystemClipboard::getTextFromClipboard() { return internalClipboard(); }
+
+//==============================================================================
+/*
+ * A page cannot start a drag into another application. Returning false tells
+ * JUCE the drag did not begin, which is accurate -- reporting success would
+ * leave the caller waiting for a drop that can never arrive.
+ */
+bool DragAndDropContainer::performExternalDragDropOfFiles (const StringArray &,
+                                                           bool,
+                                                           Component *,
+                                                           std::function<void()> callback)
+{
+    NullCheckedInvocation::invoke (callback);
+    return false;
+}
+
+bool DragAndDropContainer::performExternalDragDropOfText (const String &,
+                                                          Component *,
+                                                          std::function<void()> callback)
+{
+    NullCheckedInvocation::invoke (callback);
+    return false;
+}
+
 } // namespace juce
+
+//==============================================================================
+// Bridge to surge_gui_host.cpp. See host/surge_wasm/WasmPeerAccess.h for why
+// this indirection exists: WasmComponentPeer is only visible inside JUCE's
+// translation unit, so the host talks to it through these free functions.
+//==============================================================================
+
+#include <surge_wasm/WasmPeerAccess.h>
+
+namespace surgewasm
+{
+
+static juce::WasmComponentPeer *front()
+{
+    auto &p = juce::WasmComponentPeer::peers();
+    return p.isEmpty() ? nullptr : p.getLast();
+}
+
+void pumpMessages()
+{
+    // JUCE_MODAL_LOOPS_PERMITTED is off, so runDispatchLoopUntil is unavailable,
+    // and it would be wrong anyway -- a browser must never block. Instead drain
+    // the FIFO defined in juce_Messaging_wasm.cpp, which is what makes timers
+    // (meters, LFO displays, value readouts) and async repaints actually run.
+    juce::pumpWasmMessageQueue();
+}
+
+bool renderIfDirty()
+{
+    auto *p = front();
+    return p != nullptr && p->renderIfDirty();
+}
+
+const juce::Image *frontImage()
+{
+    auto *p = front();
+    if (p == nullptr || ! p->getImage().isValid())
+        return nullptr;
+    return &p->getImage();
+}
+
+void invalidateAll()
+{
+    if (auto *p = front())
+        p->repaint (p->getBounds().withZeroOrigin());
+}
+
+static juce::ModifierKeys makeMods (int buttons, bool shift, bool ctrl, bool alt)
+{
+    int f = 0;
+    if (buttons & 1) f |= juce::ModifierKeys::leftButtonModifier;
+    if (buttons & 2) f |= juce::ModifierKeys::rightButtonModifier;
+    if (buttons & 4) f |= juce::ModifierKeys::middleButtonModifier;
+    if (shift) f |= juce::ModifierKeys::shiftModifier;
+    if (ctrl) f |= juce::ModifierKeys::ctrlModifier;
+    if (alt) f |= juce::ModifierKeys::altModifier;
+    return juce::ModifierKeys (f);
+}
+
+void mouseEvent (int, float x, float y, int buttons, bool shift, bool ctrl, bool alt)
+{
+    auto *p = front();
+    if (p == nullptr)
+        return;
+
+    const auto mods = makeMods (buttons, shift, ctrl, alt);
+
+    // JUCE derives press/release from the modifier state rather than an event
+    // kind, so the current button mask is the whole story. Keeping the global
+    // ModifierKeys in step matters: widgets read it during drags.
+    juce::ModifierKeys::currentModifiers = mods;
+
+    p->handleMouseEvent (juce::MouseInputSource::InputSourceType::mouse,
+                         juce::Point<float> (x, y),
+                         mods,
+                         juce::MouseInputSource::defaultPressure,
+                         juce::MouseInputSource::defaultOrientation,
+                         juce::Time::currentTimeMillis());
+}
+
+void wheelEvent (float x, float y, float dx, float dy, bool shift, bool ctrl, bool alt)
+{
+    auto *p = front();
+    if (p == nullptr)
+        return;
+
+    juce::MouseWheelDetails w;
+    // Browsers report scroll as pixels, positive downward; JUCE wants a small
+    // signed fraction, positive upward.
+    constexpr float pixelsPerUnit = 120.0f;
+    w.deltaX = -dx / pixelsPerUnit;
+    w.deltaY = -dy / pixelsPerUnit;
+    w.isReversed = false;
+    w.isSmooth = true;
+    w.isInertial = false;
+
+    juce::ModifierKeys::currentModifiers = makeMods (0, shift, ctrl, alt);
+
+    p->handleMouseWheel (juce::MouseInputSource::InputSourceType::mouse,
+                         juce::Point<float> (x, y),
+                         juce::Time::currentTimeMillis(),
+                         w);
+}
+
+bool keyEvent (bool isDown, int keyCode, int textChar, bool shift, bool ctrl, bool alt)
+{
+    auto *p = front();
+    if (p == nullptr)
+        return false;
+
+    const auto mods = makeMods (0, shift, ctrl, alt);
+    juce::ModifierKeys::currentModifiers = mods;
+
+    // Keep the held-key set in step; KeyPress::isKeyCurrentlyDown reads it.
+    if (isDown)
+        juce::heldKeys().insert (keyCode);
+    else
+        juce::heldKeys().erase (keyCode);
+
+    p->handleKeyUpOrDown (isDown);
+
+    if (! isDown)
+        return false;
+
+    return p->handleKeyPress (juce::KeyPress (keyCode, mods, (juce::juce_wchar) textChar));
+}
+
+void setFocus (bool gained)
+{
+    if (auto *p = front())
+    {
+        if (gained)
+            p->grabFocus();
+        else
+            p->loseFocus();
+    }
+}
+
+} // namespace surgewasm
+
+// Key-code constants, generated by tools/gen_keycodes.py.
+#include <surge_wasm/juce_KeyCodes_wasm.cpp>

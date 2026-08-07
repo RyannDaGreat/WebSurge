@@ -2,11 +2,13 @@
 <!--
   Surge XT in the browser.
 
-  The engine is Surge XT's own DSP core compiled to WebAssembly; the interface is
-  Surge's own classic skin, positioned from Surge's own connector table. Serve
-  this directory over HTTP -- WebAssembly cannot be fetched from file:// URLs:
+  Both the engine and the INTERFACE are Surge's own code compiled to
+  WebAssembly. The canvas below is painted by SurgeGUIEditor through JUCE's
+  software rasterizer -- it is not a reimplementation.
 
-      cd src && python3 -m http.server
+  Serve over HTTPS (AudioWorklet needs a secure context):
+
+      ./run_server.sh
 -->
 <html lang="en">
 <head>
@@ -34,17 +36,16 @@
   </aside>
 
   <section id="stage">
-    <!-- The panel is exactly BASE_WINDOW_SIZE_X x BASE_WINDOW_SIZE_Y (913x569)
-         from Surge's globals.h, so skin coordinates map 1:1 with no scaling. -->
-    <div id="panel">
-      <img id="panel-bg" src="skin/bmp00102.svg" alt="" draggable="false">
-    </div>
+    <!-- Sized at runtime from sgui_width()/sgui_height(), i.e. whatever size
+         Surge itself decided the editor should be. -->
+    <canvas id="surge-canvas" tabindex="0"></canvas>
 
     <p id="help">
       Play with <kbd>z</kbd><kbd>x</kbd><kbd>c</kbd>…<kbd>/</kbd> and
       <kbd>q</kbd><kbd>w</kbd><kbd>e</kbd>…<kbd>\</kbd> (white keys);
       the row above each plays the sharps.
       <kbd>←</kbd><kbd>→</kbd> shift octave, <kbd>↑</kbd><kbd>↓</kbd> change velocity.
+      The panel itself is Surge's real interface — click and drag it as you would the plugin.
     </p>
   </section>
 </main>
@@ -52,12 +53,12 @@
 <div id="overlay">
   <div class="overlay-box">
     <h2>Surge XT</h2>
-    <p>The complete Surge XT synthesis engine, compiled to WebAssembly.</p>
+    <p>The complete Surge XT synthesizer — engine <em>and</em> interface — compiled to WebAssembly.</p>
     <p class="dim">Browsers require a click before audio can start.</p>
-    <button id="start-btn">Start audio</button>
+    <button id="start-btn">Start Surge</button>
   </div>
 </div>
 
-<script type="module" src="js/app.js"></script>
+<script type="module" src="js/gui-app.js"></script>
 </body>
 </html>
