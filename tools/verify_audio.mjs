@@ -16,6 +16,7 @@
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SAMPLE_RATE = 48000;
@@ -93,8 +94,39 @@ function levels(samples) {
   return { peak, rms: Math.sqrt(sumSq / (samples.length || 1)) };
 }
 
+/**
+ * Query. Loads the Emscripten engine glue and returns its factory function.
+ *
+ * The glue ends in `module.exports = createSurgeEngine`, i.e. it is CommonJS.
+ * But the root package.json declares "type": "module", so Node treats the .js
+ * as ESM: `import()` yields no default and `require()` yields a namespace
+ * object. Neither is callable, and the failure reads as the unhelpful
+ * "createSurgeEngine is not a function".
+ *
+ * Evaluating the source with a CommonJS-shaped scope is the honest fix and
+ * keeps it local to this harness -- the browser never hits this, because the
+ * worklet bundle concatenates the glue as a plain script rather than importing it.
+ *
+ * @param {string} path - absolute path to surge-engine.js
+ * @returns {Function} the module factory
+ *
+ * @example loadEngineFactory('/…/surge-engine.js') // async function createSurgeEngine()
+ */
+function loadEngineFactory(path) {
+  const src = readFileSync(path, 'utf8');
+  const module = { exports: {} };
+  const fn = new Function('module', 'exports', 'require', '__dirname', '__filename', src);
+  fn(module, module.exports, createRequire(import.meta.url), dirname(path), path);
+
+  const factory = typeof module.exports === 'function' ? module.exports : module.exports.default;
+  if (typeof factory !== 'function') {
+    throw new Error(`${path} did not export a factory function`);
+  }
+  return factory;
+}
+
 const enginePath = join(REPO_ROOT, 'src/js/surge-engine.js');
-const { default: createSurgeEngine } = await import(enginePath);
+const createSurgeEngine = loadEngineFactory(enginePath);
 
 console.log('loading engine...');
 const M = await createSurgeEngine();

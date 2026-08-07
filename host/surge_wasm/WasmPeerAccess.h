@@ -67,6 +67,14 @@ void wheelEvent (float x, float y, float deltaX, float deltaY, bool shift, bool 
 /* Command. Routes a key event. Returns true if JUCE consumed it. */
 bool keyEvent (bool isDown, int keyCode, int textChar, bool shift, bool ctrl, bool alt);
 
+/*
+ * Command. Tells JUCE how big the canvas is.
+ *
+ * Must match the canvas exactly: JUCE fits popup menus to the display, so an
+ * oversized value makes it place them off-canvas where they get clipped.
+ */
+void setDisplaySize (int width, int height);
+
 /* Command. Tells the front-most peer the page gained or lost focus. */
 void setFocus (bool gained);
 

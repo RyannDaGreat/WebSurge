@@ -42,7 +42,7 @@ mkdirSync(OUT_DIR, { recursive: true });
 const browser = await puppeteer.launch({
   headless: 'new',
   args: [
-    '--no-sandbox', '--disable-dev-shm-usage',
+    '--ignore-certificate-errors', '--no-sandbox', '--disable-dev-shm-usage',
     '--autoplay-policy=no-user-gesture-required', '--mute-audio',
   ],
 });

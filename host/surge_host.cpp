@@ -34,6 +34,7 @@
 
 #include <emscripten/emscripten.h>
 
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <sstream>
@@ -69,6 +70,56 @@ size_t gCarryPos = 0;
 
 /* Scratch storage for strings handed back to JS. Valid until the next call. */
 std::string gScratch;
+
+/*
+ * TEMPO -- why a host that ignores it is not merely incomplete but wrong.
+ *
+ * Every tempo-synced time in Surge (delay times, LFO rates, temposynced
+ * envelope segments) is scaled by storage.temposyncratio, which
+ * SurgeSynthesizer::processControl() recomputes on every 32-frame block as
+ *
+ *     temposyncratio     = time_data.tempo / 120
+ *     temposyncratio_inv = 1 / temposyncratio
+ *
+ * unconditionally -- there is no "no tempo" branch on that path. A host that
+ * never writes time_data.tempo leaves it at 0, so the ratio is 0 and its
+ * reciprocal is +inf. sst::effects::Delay then computes
+ *
+ *     timeL = sampleRate * temposyncratio_inv * 2^(time param)   -> +inf
+ *
+ * and clamps it to its 262144-sample buffer: a 5.46 s echo at 48 kHz that
+ * exists in no patch. Temposynced LFOs and envelopes get the mirror-image
+ * problem, a rate multiplied by 0, and freeze.
+ *
+ * Desktop Surge never reaches this state. In a DAW the playhead supplies a
+ * tempo; in the standalone build SurgeSynthProcessor falls back to a fixed
+ * 120 BPM (its `standaloneTempo` member) and calls resetStateFromTimeData()
+ * every block. The browser is the standalone case, so we do the same.
+ *
+ * Not replicated: SurgeSynthProcessor also adopts storage.unstreamedTempo on
+ * patch load. That is gated on the `overrideTempoOnPatchLoad` user preference,
+ * which is off by default and makes unstreamedTempo -1, so default desktop
+ * behaviour is to ignore the patch's saved tempo. We ignore it too.
+ */
+constexpr double kDefaultTempoBPM = 120.0;
+double gTempoBPM = kDefaultTempoBPM;
+
+/*
+ * Command. Pushes gTempoBPM into the synth and recomputes the derived tempo
+ * state (temposyncratio, songpos, isPlaying). Requires gSynth to exist.
+ *
+ * Mirrors SurgeSynthProcessor::processBlockPlayhead()'s standalone branch.
+ */
+void applyTempo()
+{
+    gSynth->time_data.tempo = gTempoBPM;
+    gSynth->time_data.timeSigNumerator = 4;
+    gSynth->time_data.timeSigDenominator = 4;
+    // Standalone Surge always reports the transport as running, so modulators
+    // that key off song position advance instead of sitting frozen at bar zero.
+    gSynth->time_data.isPlaying = true;
+    gSynth->resetStateFromTimeData();
+}
 
 /* Pure function. Escapes a string for embedding in JSON. */
 std::string jsonEscape(const std::string &s)
@@ -117,6 +168,9 @@ extern "C"
         gLayer = std::make_unique<BrowserPluginLayer>();
         gSynth = std::make_unique<SurgeSynthesizer>(gLayer.get(), dataPath ? dataPath : "");
         gSynth->setSamplerate(sampleRate);
+
+        gSynth->time_data.ppqPos = 0.0;
+        applyTempo();
 
         gCarryL.clear();
         gCarryR.clear();
@@ -338,6 +392,12 @@ extern "C"
             gSynth->process();
 
             const int block = gSynth->getBlockSize();
+
+            // Advance the transport exactly as SurgeSynthProcessor does after
+            // each engine block, so song-position-driven modulation keeps time.
+            gSynth->time_data.ppqPos += static_cast<double>(block) * gSynth->time_data.tempo /
+                                        (60.0 * gSynth->storage.samplerate);
+
             gCarryL.assign(gSynth->output[0], gSynth->output[0] + block);
             gCarryR.assign(gSynth->output[1], gSynth->output[1] + block);
             gCarryPos = 0;
@@ -345,6 +405,38 @@ extern "C"
 
         return written;
     }
+
+    /*
+     * Command. Sets the tempo every tempo-synced parameter is measured against.
+     *
+     * There is no host transport in a browser tab, so this is the only way the
+     * tempo can ever change; without it the engine stays at kDefaultTempoBPM.
+     * Returns 1 on success, 0 if the synth does not exist or bpm is not
+     * positive -- a non-positive tempo is precisely the bug this exists to
+     * prevent, so it is refused loudly rather than clamped.
+     */
+    EMSCRIPTEN_KEEPALIVE
+    int sh_set_tempo(float bpm)
+    {
+        if (!gSynth)
+        {
+            std::fprintf(stderr, "sh_set_tempo: sh_init has not been called\n");
+            return 0;
+        }
+        if (!(bpm > 0.f))
+        {
+            std::fprintf(stderr, "sh_set_tempo: refusing non-positive tempo %f BPM\n",
+                         static_cast<double>(bpm));
+            return 0;
+        }
+        gTempoBPM = bpm;
+        applyTempo();
+        return 1;
+    }
+
+    /* Query. Current tempo in BPM. */
+    EMSCRIPTEN_KEEPALIVE
+    float sh_get_tempo() { return static_cast<float>(gTempoBPM); }
 
     /* Query. Surge's internal block size (32). */
     EMSCRIPTEN_KEEPALIVE

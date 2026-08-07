@@ -245,10 +245,18 @@ JUCE_API void JUCE_CALLTYPE Process::hide() {}
 void Desktop::setKioskComponent (Component *, bool, bool) {}
 
 /*
- * The canvas is the display. Its size is supplied by JS at startup rather than
- * probed, since there is no screen to ask.
+ * The canvas IS the display, and its size must be reported honestly.
+ *
+ * JUCE positions popup menus to fit within the display, flipping or shifting
+ * them when they would overflow. Claiming a display larger than the canvas
+ * makes it place menus in a region that does not exist, and compositeInto then
+ * clips them -- menus near the right or bottom edge came out cut off.
+ *
+ * The fallback below is only used before setDisplaySize() runs; it is
+ * deliberately small so that a missing call shows up as visibly wrong menu
+ * placement rather than silently working on a big screen and failing elsewhere.
  */
-static Rectangle<int> wasmDisplayArea { 0, 0, 1280, 800 };
+static Rectangle<int> wasmDisplayArea { 0, 0, 913, 569 };
 
 void Displays::findDisplays (const Desktop &)
 {
@@ -302,7 +310,7 @@ bool detail::MouseInputSourceList::addSource()
 bool detail::MouseInputSourceList::canUseTouch() const { return false; }
 
 /* Last position JS reported; there is no OS cursor to query. */
-static Point<float> wasmMousePosition { 0.0f, 0.0f };
+Point<float> wasmMousePosition { 0.0f, 0.0f };
 
 Point<float> MouseInputSource::getCurrentRawMousePosition() { return wasmMousePosition; }
 
@@ -583,9 +591,30 @@ static juce::ModifierKeys makeMods (int buttons, bool shift, bool ctrl, bool alt
     return juce::ModifierKeys (f);
 }
 
+/*
+ * Query. The peer that should receive a click at this canvas position.
+ *
+ * Front-most first, so an open menu wins over the editor beneath it. Falling
+ * back to the front peer when the point is outside everything is deliberate:
+ * clicking away from an open popup must still reach a peer, or JUCE's modal
+ * manager never gets the event that dismisses the menu.
+ */
+static juce::WasmComponentPeer *peerAt (float x, float y)
+{
+    auto &peers = juce::WasmComponentPeer::peers();
+    const juce::Point<int> pt ((int) x, (int) y);
+
+    for (int i = peers.size(); --i >= 0;)
+        if (auto *p = peers[i])
+            if (p->getBounds().contains (pt))
+                return p;
+
+    return front();
+}
+
 void mouseEvent (int, float x, float y, int buttons, bool shift, bool ctrl, bool alt)
 {
-    auto *p = front();
+    auto *p = peerAt (x, y);
     if (p == nullptr)
         return;
 
@@ -596,8 +625,19 @@ void mouseEvent (int, float x, float y, int buttons, bool shift, bool ctrl, bool
     // ModifierKeys in step matters: widgets read it during drags.
     juce::ModifierKeys::currentModifiers = mods;
 
+    // Screen position, for MouseInputSource::getCurrentRawMousePosition. The
+    // canvas IS the screen here, so canvas coordinates are screen coordinates.
+    juce::wasmMousePosition = juce::Point<float> (x, y);
+
+    // handleMouseEvent wants the position WITHIN THE PEER, not on the screen.
+    // For the editor those are the same because its bounds start at (0,0), but
+    // a popup menu sits at an offset -- so passing canvas coordinates made every
+    // menu read the mouse as being off by exactly its own position, highlighting
+    // and selecting the wrong item.
+    const auto origin = p->getBounds().getPosition().toFloat();
+
     p->handleMouseEvent (juce::MouseInputSource::InputSourceType::mouse,
-                         juce::Point<float> (x, y),
+                         juce::Point<float> (x, y) - origin,
                          mods,
                          juce::MouseInputSource::defaultPressure,
                          juce::MouseInputSource::defaultOrientation,
@@ -649,6 +689,24 @@ bool keyEvent (bool isDown, int keyCode, int textChar, bool shift, bool ctrl, bo
         return false;
 
     return p->handleKeyPress (juce::KeyPress (keyCode, mods, (juce::juce_wchar) textChar));
+}
+
+void setDisplaySize (int width, int height)
+{
+    if (width <= 0 || height <= 0)
+        return;
+
+    const juce::Rectangle<int> area { 0, 0, width, height };
+    if (area == juce::wasmDisplayArea)
+        return;
+
+    juce::wasmDisplayArea = area;
+
+    // Desktop caches its display list, so it has to be told to re-ask; without
+    // this the new size is ignored and menus keep using the stale bounds.
+    // getDisplays() hands back a const reference but refresh() is a public,
+    // non-const member -- casting is the only route JUCE offers here.
+    const_cast<juce::Displays &> (juce::Desktop::getInstance().getDisplays()).refresh();
 }
 
 void setFocus (bool gained)

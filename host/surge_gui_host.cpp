@@ -80,6 +80,11 @@ extern "C"
         if (gEditor == nullptr)
             return 0;
 
+        // Tell JUCE the display is exactly the editor, BEFORE it goes on the
+        // desktop. Popup menus are positioned to fit the display, so this is
+        // what keeps them from being placed off-canvas and clipped.
+        surgewasm::setDisplaySize (gEditor->getWidth(), gEditor->getHeight());
+
         // addToDesktop is what creates a ComponentPeer -- ours. Without it the
         // component tree exists but nothing ever paints.
         gEditor->addToDesktop (0);
