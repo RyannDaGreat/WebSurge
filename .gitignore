@@ -1,0 +1,21 @@
+# Build trees and toolchains — regenerable via setup.sh / build scripts
+/build/
+/vendor/
+/emsdk/
+.claude_logs/
+.claude_vlm_checks/
+.frenzy/
+
+# Bulk Surge resource data copied out of the upstream clone by tools/stage_data.sh.
+# ~480 MB of patches/wavetables/impulses; reproducible from the pinned Surge SHA,
+# so it is deliberately NOT in git. Run tools/stage_data.sh to repopulate.
+/src/data/
+
+# Emscripten build products (regenerable)
+/src/js/surge-engine.js
+/src/js/surge-engine.wasm
+/src/js/*.wasm.map
+
+__pycache__/
+*.pyc
+scratchpad*.py
