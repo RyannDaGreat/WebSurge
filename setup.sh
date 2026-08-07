@@ -40,6 +40,33 @@ require() {
     command -v "$1" >/dev/null 2>&1 || die "'$1' not found on PATH. Install it and re-run."
 }
 
+# JUCE's CMake builds `juceaide`, a NATIVE helper tool, to embed Surge's fonts
+# and skin SVGs as binary data. Being native, it links against real X11/font
+# libraries even though our actual target is WebAssembly -- so these headers are
+# needed on the build machine and have nothing to do with the wasm output.
+#
+# Without them the build dies with "X11/extensions/Xrandr.h: No such file",
+# which is deeply confusing when you are cross-compiling to a browser.
+APT_BUILD_DEPS=(
+    libxrandr-dev libxinerama-dev libxcursor-dev libxcomposite-dev
+    libasound2-dev libfreetype6-dev libfontconfig1-dev libgl1-mesa-dev
+)
+
+install_system_deps() {
+    # Skip quickly when they are already present; apt-get update is slow.
+    if [ -f /usr/include/X11/extensions/Xrandr.h ] && [ -f /usr/include/freetype2/ft2build.h ]; then
+        log "System build dependencies already present"
+        return
+    fi
+
+    command -v apt-get >/dev/null 2>&1 || die \
+        "Need these packages for JUCE's native juceaide tool, and apt-get is not available: ${APT_BUILD_DEPS[*]}"
+
+    log "Installing native build dependencies for juceaide"
+    apt-get update -qq
+    apt-get install -y -qq "${APT_BUILD_DEPS[@]}"
+}
+
 install_emsdk() {
     require git
     require python3
@@ -123,11 +150,12 @@ apply_patches() {
 
 main() {
     case "${1:-all}" in
+        deps)    install_system_deps ;;
         emsdk)   install_emsdk ;;
         surge)   install_surge ;;
         patches) apply_patches ;;
-        all)     install_emsdk; install_surge ;;
-        *)       die "Unknown target '$1'. Use: emsdk | surge | patches | all" ;;
+        all)     install_system_deps; install_emsdk; install_surge ;;
+        *)       die "Unknown target '$1'. Use: deps | emsdk | surge | patches | all" ;;
     esac
 
     log "Setup complete."
