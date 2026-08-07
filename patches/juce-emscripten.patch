@@ -1,0 +1,45 @@
+# target: libs/JUCE
+#
+# Emscripten/WASM support for JUCE 8.0.12.
+# JUCE 8 already defines JUCE_WASM and ships juce_SystemStats_wasm.cpp, but the
+# target is incomplete: that file never includes <emscripten.h>, and the thread
+# priority table has no WASM entries so it is zero-length and fails static_assert.
+# Upstreamable as-is.
+diff --git a/modules/juce_core/native/juce_SystemStats_wasm.cpp b/modules/juce_core/native/juce_SystemStats_wasm.cpp
+index 803a74f..cb45def 100644
+--- a/modules/juce_core/native/juce_SystemStats_wasm.cpp
++++ b/modules/juce_core/native/juce_SystemStats_wasm.cpp
+@@ -32,6 +32,10 @@
+   ==============================================================================
+ */
+ 
++// This file calls emscripten_get_now() but never declares it. Upstream's wasm
++// target is incomplete rather than wrong -- the header simply is not included.
++#include <emscripten.h>
++
+ namespace juce
+ {
+ 
+diff --git a/modules/juce_core/native/juce_ThreadPriorities_native.h b/modules/juce_core/native/juce_ThreadPriorities_native.h
+index 6f63365..0a1ec4a 100644
+--- a/modules/juce_core/native/juce_ThreadPriorities_native.h
++++ b/modules/juce_core/native/juce_ThreadPriorities_native.h
+@@ -89,6 +89,18 @@ struct ThreadPriorities
+         { Thread::Priority::low,        THREAD_PRIORITY_LOWEST },
+         { Thread::Priority::background, THREAD_PRIORITY_IDLE },
+        #endif
++
++       #if JUCE_WASM
++        // WebAssembly exposes no thread scheduling priorities, so every level
++        // maps to the same native value -- the same approach JUCE already takes
++        // on Linux/BSD above. The entries must still exist or the table is
++        // zero-length and the static_assert below fails to compile.
++        { Thread::Priority::highest,    0 },
++        { Thread::Priority::high,       0 },
++        { Thread::Priority::normal,     0 },
++        { Thread::Priority::low,        0 },
++        { Thread::Priority::background, 0 },
++       #endif
+     };
+ 
+     static_assert (std::size (table) == 5,
