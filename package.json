@@ -1,0 +1,7 @@
+{
+  "name": "surge-wasm-tools",
+  "private": true,
+  "type": "module",
+  "description": "Dev-only tooling for browser testing the Surge WASM site. Not shipped in src/.",
+  "devDependencies": { "puppeteer": "^23.0.0" }
+}

@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<!--
+  Surge XT in the browser.
+
+  The engine is Surge XT's own DSP core compiled to WebAssembly; the interface is
+  Surge's own classic skin, positioned from Surge's own connector table. Serve
+  this directory over HTTP -- WebAssembly cannot be fetched from file:// URLs:
+
+      cd src && python3 -m http.server
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Surge XT — WebAssembly</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="css/surge.css">
+</head>
+<body>
+
+<header>
+  <h1>Surge XT</h1>
+  <span id="status">loading…</span>
+  <span id="kb-state"></span>
+  <span id="unplaced" class="warn"></span>
+  <button id="panic-btn" title="Silence all sounding notes">Panic</button>
+</header>
+
+<div id="error-bar" hidden></div>
+
+<main>
+  <aside id="patch-list">
+    <div class="patch-count">patches…</div>
+  </aside>
+
+  <section id="stage">
+    <!-- The panel is exactly BASE_WINDOW_SIZE_X x BASE_WINDOW_SIZE_Y (913x569)
+         from Surge's globals.h, so skin coordinates map 1:1 with no scaling. -->
+    <div id="panel">
+      <img id="panel-bg" src="skin/bmp00102.svg" alt="" draggable="false">
+    </div>
+
+    <p id="help">
+      Play with <kbd>z</kbd><kbd>x</kbd><kbd>c</kbd>…<kbd>/</kbd> and
+      <kbd>q</kbd><kbd>w</kbd><kbd>e</kbd>…<kbd>\</kbd> (white keys);
+      the row above each plays the sharps.
+      <kbd>←</kbd><kbd>→</kbd> shift octave, <kbd>↑</kbd><kbd>↓</kbd> change velocity.
+    </p>
+  </section>
+</main>
+
+<div id="overlay">
+  <div class="overlay-box">
+    <h2>Surge XT</h2>
+    <p>The complete Surge XT synthesis engine, compiled to WebAssembly.</p>
+    <p class="dim">Browsers require a click before audio can start.</p>
+    <button id="start-btn">Start audio</button>
+  </div>
+</div>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

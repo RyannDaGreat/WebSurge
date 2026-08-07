@@ -1,0 +1,260 @@
+/*
+ * surge.css -- chrome around Surge's own panel artwork.
+ *
+ * The panel itself is Surge's classic skin at its native 913x569, so nothing
+ * here restyles the synth. This file styles only the surrounding shell: header,
+ * patch browser, overlay.
+ *
+ * Widget positions and sizes are NOT set here. They come from layout.json,
+ * dumped from Surge's connector registry, and are applied as inline styles by
+ * widgets.js -- they are data, not design.
+ */
+
+:root {
+  /* Surge's native panel size, from globals.h BASE_WINDOW_SIZE_X/Y. */
+  --panel-w: 913px;
+  --panel-h: 569px;
+
+  --bg: #16181d;
+  --panel-chrome: #1f232b;
+  --row: #242933;
+  --row-alt: #20242d;
+  --text: #e6e8ec;
+  --dim: #9aa1ad;
+  --accent: #ff9000;
+  --danger: #ff5f56;
+  --warn: #ffd866;
+  --border: #3c4454;
+
+  --gap-xs: 4px;
+  --gap-sm: 8px;
+  --gap-md: 14px;
+  --gap-lg: 20px;
+
+  --radius: 6px;
+  --sidebar-w: 300px;
+  --header-h: 44px;
+
+  --font-ui: 13px/1.4 system-ui, sans-serif;
+  --font-small: 11px;
+  --font-title: 16px;
+  --font-mono: 11px/1.3 ui-monospace, monospace;
+
+  --overlay-veil: rgba(10, 12, 16, 0.93);
+  --shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: var(--font-ui);
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ---- header ---- */
+
+header {
+  display: flex;
+  align-items: center;
+  gap: var(--gap-md);
+  height: var(--header-h);
+  padding: 0 var(--gap-md);
+  background: var(--panel-chrome);
+  flex: 0 0 auto;
+}
+
+header h1 {
+  font-size: var(--font-title);
+  margin: 0;
+}
+
+#status { color: var(--dim); font-size: var(--font-small); flex: 1; }
+#kb-state { color: var(--accent); font-size: var(--font-small); }
+.warn { color: var(--warn); font-size: var(--font-small); }
+
+button {
+  background: var(--row);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--gap-xs) var(--gap-md);
+  cursor: pointer;
+  font-size: var(--font-small);
+}
+button:hover { background: var(--row-alt); }
+button:disabled { opacity: 0.45; cursor: default; }
+
+#error-bar {
+  background: var(--danger);
+  color: #000;
+  padding: var(--gap-sm) var(--gap-md);
+  font-size: var(--font-small);
+  flex: 0 0 auto;
+}
+
+/* ---- layout ---- */
+
+main {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+#stage {
+  flex: 1;
+  overflow: auto;
+  padding: var(--gap-lg);
+}
+
+/* ---- the synth panel ---- */
+
+#panel {
+  position: relative;
+  width: var(--panel-w);
+  height: var(--panel-h);
+  /* Controls are positioned in Surge's own coordinate space; any scaling or
+     centering here would silently shift every hit target. */
+  transform-origin: top left;
+  box-shadow: var(--shadow);
+  user-select: none;
+}
+
+#panel-bg {
+  position: absolute;
+  inset: 0;
+  width: var(--panel-w);
+  height: var(--panel-h);
+  pointer-events: none;
+}
+
+.w {
+  position: absolute;
+  cursor: pointer;
+}
+
+.slider { position: absolute; }
+
+/* Tray and handle are sprite sheets positioned by background-position; they must
+   never repeat or scale, or the selected cell bleeds into its neighbours. */
+.slider-tray,
+.slider-handle {
+  position: absolute;
+  pointer-events: none;
+  background-repeat: no-repeat;
+}
+.slider-tray { left: 0; top: 0; }
+
+.switch { background-repeat: no-repeat; }
+.switch-noart { outline: 1px dashed var(--border); }
+
+.readout {
+  font: var(--font-mono);
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+#help {
+  color: var(--dim);
+  font-size: var(--font-small);
+  max-width: var(--panel-w);
+  margin-top: var(--gap-md);
+}
+
+kbd {
+  background: var(--row);
+  border: 1px solid var(--border);
+  border-radius: var(--gap-xs);
+  padding: 0 var(--gap-xs);
+  font: var(--font-mono);
+}
+
+/* ---- patch browser ---- */
+
+#patch-list {
+  width: var(--sidebar-w);
+  flex: 0 0 auto;
+  background: var(--panel-chrome);
+  border-right: 1px solid #000;
+  overflow-y: auto;
+  padding-bottom: var(--gap-lg);
+}
+
+.patch-count {
+  padding: var(--gap-sm) var(--gap-md);
+  font-size: var(--font-small);
+  color: var(--dim);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.patch-filter {
+  width: 100%;
+  padding: var(--gap-sm) var(--gap-md);
+  background: var(--row);
+  color: var(--text);
+  border: none;
+  border-top: 1px solid #000;
+  border-bottom: 1px solid #000;
+  outline: none;
+  font-size: var(--font-small);
+}
+
+.bank > summary,
+.category > summary {
+  cursor: pointer;
+  padding: var(--gap-xs) var(--gap-md);
+  font-size: var(--font-small);
+  color: var(--dim);
+}
+.bank > summary { color: var(--text); background: var(--row-alt); }
+.category > summary { padding-left: var(--gap-lg); }
+
+button.patch {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  padding: var(--gap-xs) var(--gap-lg) var(--gap-xs) calc(var(--gap-lg) + var(--gap-md));
+  font-size: var(--font-small);
+  color: var(--text);
+}
+button.patch:hover { background: var(--row); }
+button.patch.selected { background: var(--accent); color: #000; }
+
+/* ---- start overlay ---- */
+
+#overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--overlay-veil);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+}
+#overlay[hidden] { display: none; }
+
+.overlay-box {
+  background: var(--panel-chrome);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--gap-lg);
+  max-width: 30rem;
+  text-align: center;
+  box-shadow: var(--shadow);
+}
+.overlay-box h2 { margin-top: 0; }
+.overlay-box .dim { color: var(--dim); font-size: var(--font-small); }
+#start-btn { padding: var(--gap-sm) var(--gap-lg); font-size: var(--font-ui); }

@@ -45,7 +45,20 @@ class SurgeProcessor extends AudioWorkletProcessor {
     if (!wasmBinary) throw new Error('surge-worklet: wasmBinary was not supplied');
 
     // createSurgeEngine comes from the glue concatenated ahead of this file.
-    createSurgeEngine({ wasmBinary }).then((M) => this.onEngineReady(M, sr, dataPath || ''));
+    //
+    // The .catch is load-bearing: a rejection here happens inside the worklet's
+    // constructor, where neither onprocessorerror nor the page's console sees
+    // it. Without this the node simply stays silent forever with no diagnostic
+    // anywhere -- which is the exact failure mode this project forbids.
+    createSurgeEngine({ wasmBinary })
+      .then((M) => this.onEngineReady(M, sr, dataPath || ''))
+      .catch((err) => {
+        this.port.postMessage({
+          type: 'error',
+          message: `Engine failed to start: ${err && (err.message || err)}`,
+          stack: err && err.stack ? String(err.stack) : undefined,
+        });
+      });
   }
 
   /**
