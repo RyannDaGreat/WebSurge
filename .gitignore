@@ -16,6 +16,11 @@
 /src/js/surge-engine.wasm
 /src/js/*.wasm.map
 
+# Dev-only browser-test tooling (puppeteer). Reinstalled by run_server.sh /
+# `npm install`; package-lock.json is committed so it is reproducible.
+/node_modules/
+
 __pycache__/
 *.pyc
-scratchpad*.py
+scratchpad*
+!scratchpad*.md

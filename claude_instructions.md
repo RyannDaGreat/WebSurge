@@ -84,6 +84,24 @@ Browser main thread                    Audio thread (AudioWorklet)
 
 ## 4. Key paths
 
+### Running it
+
+```sh
+./setup.sh                        # emsdk 6.0.0 + Surge at the pinned SHA + patches
+./build.sh                        # engine -> src/js/surge-engine.{js,wasm} + worklet bundle
+./tools/gen_layout.sh             # src/layout.json + src/skin/ from Surge's skin model
+./tools/stage_data.sh             # ~469 MB of patches/wavetables into src/data/
+uv run tools/gen_patch_index.py   # src/data/patches.json
+./run_server.sh                   # serve src/ ; prints the localhost AND LAN URL
+```
+
+Verification (never skip these — a compile is not evidence of sound):
+
+```sh
+node tools/verify_audio.mjs       # renders 2s headlessly, measures pitch/envelope
+node tools/browser_test.mjs       # real Chrome: engine, GUI, patches, keyboard
+```
+
 | Path | What |
 | --- | --- |
 | `src/` | The static website. This is the deliverable. |
