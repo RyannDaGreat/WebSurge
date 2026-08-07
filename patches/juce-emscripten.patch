@@ -1,10 +1,12 @@
 # target: libs/JUCE
 #
 # Emscripten/WASM support for JUCE 8.0.12.
-# JUCE 8 already defines JUCE_WASM and ships juce_SystemStats_wasm.cpp, but the
-# target is incomplete: that file never includes <emscripten.h>, and the thread
-# priority table has no WASM entries so it is zero-length and fails static_assert.
-# Upstreamable as-is.
+#  - juce_SystemStats_wasm.cpp never includes <emscripten.h>
+#  - the thread priority table has no WASM entries, so it is zero-length and
+#    fails its own static_assert
+#  - juce_gui_basics.cpp has no JUCE_WASM branch in its platform #elif chain;
+#    the hook points at host/surge_wasm/, which lives in the dump so the
+#    ComponentPeer stays reviewable rather than buried in a vendor patch.
 diff --git a/modules/juce_core/native/juce_SystemStats_wasm.cpp b/modules/juce_core/native/juce_SystemStats_wasm.cpp
 index 803a74f..cb45def 100644
 --- a/modules/juce_core/native/juce_SystemStats_wasm.cpp
@@ -43,3 +45,21 @@ index 6f63365..0a1ec4a 100644
      };
  
      static_assert (std::size (table) == 5,
+diff --git a/modules/juce_gui_basics/juce_gui_basics.cpp b/modules/juce_gui_basics/juce_gui_basics.cpp
+index 1ee4e70..f721e6f 100644
+--- a/modules/juce_gui_basics/juce_gui_basics.cpp
++++ b/modules/juce_gui_basics/juce_gui_basics.cpp
+@@ -242,6 +242,13 @@
+ 
+  #include "native/juce_FileChooser_linux.cpp"
+ 
++#elif JUCE_WASM
++ // The WASM platform layer lives outside the JUCE tree, in the Surge dump, so
++ // it stays reviewable and versioned there rather than inside a vendor patch.
++ // build.sh puts host/ on the include path.
++ #include <surge_wasm/juce_Windowing_wasm.cpp>
++ #include <surge_wasm/juce_FileChooser_wasm.cpp>
++
+ #elif JUCE_ANDROID
+ 
+  #include "juce_core/files/juce_common_MimeTypes.h"
