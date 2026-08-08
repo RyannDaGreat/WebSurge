@@ -7,10 +7,28 @@
  *
  *   { name, bpm, timebase, grid, snap, notes: [{pitch, start, length}], note }
  *
- * `timebase` is ticks per BAR (webaudio-pianoroll's own unit), so a 4/4 tune
- * written in sixteenths has timebase 16 and a 3/8 tune has timebase 6. `pitch`
- * is a MIDI note number under scientific pitch notation, where 60 is C4 --
+ * plus an optional `lengthTicks`, which forces the loop length. Without it the
+ * loop is exactly as long as the music, rounded up to a whole bar -- right for a
+ * tune, wrong for an empty roll you are about to draw into.
+ *
+ * `pitch` is a MIDI note number under scientific pitch notation, where 60 is C4,
  * matching the component's default `octadj="-1"`.
+ *
+ * TIMEBASE IS NOT A FREE CHOICE
+ * -----------------------------
+ * `timebase` is webaudio-pianoroll's ticks per bar, and the obvious reading --
+ * "set it to whatever your metre needs" -- is wrong. Its tempo maths is
+ * `tick2time = 4*60/tempo/timebase`, which assumes every bar is four quarter
+ * notes. So `timebase` actually means "ticks in a 4/4 bar at your tick
+ * resolution", and for sixteenth-note ticks it is 16 whatever the metre is.
+ *
+ * This was measured, not reasoned about: Für Elise first went in with
+ * timebase 6 for its 3/8 bars, and the browser test showed one note where
+ * twelve were due -- every tick 2.7x too long, so 68 bpm sounded like 25.
+ *
+ * The consequence is that a tune not in 4/4 gets a correct rhythm and wrong bar
+ * lines. `grid` is the escape hatch: set it to the real bar length in ticks and
+ * the metre appears as grid lines. See Für Elise below.
  *
  * HONESTY IS A FIELD, NOT A README
  * --------------------------------
@@ -36,10 +54,15 @@
 
 'use strict';
 
-/** Sixteenth-note ticks per bar, for the 4/4 tunes. */
+/**
+ * Ticks per bar for everything here: sixteenth-note ticks, four quarters to the
+ * bar. Fixed at 16 because the component's tempo maths requires it -- see the
+ * header. Metres other than 4/4 carry their real bar length in `grid` instead.
+ */
 const BAR_16 = 16;
-/** Sixteenth-note ticks per bar, for the 3/8 tunes. Six sixteenths is 3/8. */
-const BAR_6 = 6;
+
+/** Six sixteenths is one 3/8 bar. Used as Für Elise's `grid`, not its timebase. */
+const BAR_3_8 = 6;
 
 /** Durations in sixteenth ticks. */
 const SIXTEENTH = 1;
@@ -317,13 +340,17 @@ export const PRESETS = [
   {
     name: 'Für Elise (opening)',
     bpm: 68,
-    timebase: BAR_6,
-    grid: EIGHTH,
+    timebase: BAR_16,
+    grid: BAR_3_8,
     snap: SIXTEENTH,
+    lengthTicks: 42,
     notes: FUR_ELISE,
     note: 'Transcribed from the Wikipedia LilyPond incipit, 3/8. Every bar sums '
       + 'to exactly six sixteenths, which checks the reading. Stops at the A4 '
-      + 'downbeat after bar 5; nothing beyond the incipit was added.',
+      + 'downbeat after bar 5; nothing beyond the incipit was added. The roll\'s '
+      + 'heavy bar lines are 4/4 and do NOT match the metre -- the component ties '
+      + 'tempo to a four-quarter bar -- so the 3/8 bars are the light grid lines, '
+      + 'every six ticks.',
   },
   {
     name: 'Canon in D (bass + subject)',
@@ -399,6 +426,7 @@ export const PRESETS = [
     timebase: BAR_16,
     grid: QUARTER,
     snap: SIXTEENTH,
+    lengthTicks: 4 * BAR_16,
     notes: [],
     note: 'Empty. Four bars of nothing to draw into.',
   },

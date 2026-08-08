@@ -128,7 +128,7 @@ const PRELOAD_SECONDS = 0.5;
 /** Roll geometry, in px. Width is fitted to the panel between these bounds. */
 const ROLL_HEIGHT_PX = 340;
 const MIN_ROLL_WIDTH_PX = 460;
-const MAX_ROLL_WIDTH_PX = 1180;
+const MAX_ROLL_WIDTH_PX = 1600;
 /** The wrapper's p-3 padding, both sides, subtracted from the panel width. */
 const ROLL_INSET_PX = 24;
 
@@ -214,7 +214,7 @@ export function toSequence(notes) {
  * @param {Array<{pitch: number}>} notes
  * @returns {{yoffset: number, yrange: number}}
  *
- * @example pitchWindow([{pitch: 60}, {pitch: 72}])  // {yoffset: 58, yrange: 25}
+ * @example pitchWindow([{pitch: 60}, {pitch: 72}])  // {yoffset: 54, yrange: 25}
  * @example pitchWindow([])                          // {yoffset: 48, yrange: 25}
  *
  * @example
@@ -254,11 +254,18 @@ export function pitchWindow(notes) {
  * @returns {{name, bpm, timebase, grid, snap, notes, note}} a roll document
  *
  * @example
- * midiToDoc({division: 480, tempoBpm: 90, tempoChanges: 0, unterminated: 0,
- *            notes: [{pitch: 60, start: 0, length: 480, velocity: 64}]}, 'x.mid')
- * // {name: 'x.mid', bpm: 90, timebase: 1920, grid: 480, snap: 120,
- * //  notes: [{pitch: 60, start: 0, length: 480}],
- * //  note: 'Imported from x.mid: 1 notes, 480 ticks per quarter, 90.0 bpm.'}
+ * // A 480-ticks-per-quarter file becomes a 1920-tick bar, so the quarter-note
+ * // grid is 480 ticks and the sixteenth-note snap is 120.
+ * const doc = midiToDoc(
+ *   {division: 480, tempoBpm: 90, tempoChanges: 0, unterminated: 0,
+ *    notes: [{pitch: 60, start: 0, length: 480, velocity: 64}]},
+ *   'x.mid');
+ * doc.timebase        // 1920
+ * doc.grid            // 480
+ * doc.snap            // 120
+ * doc.bpm             // 90
+ * doc.notes           // [{pitch: 60, start: 0, length: 480}]  -- velocity dropped
+ * doc.note.slice(0, 27)  // 'Imported from x.mid: 1 note'
  */
 export function midiToDoc(midi, label) {
   const timebase = midi.division * BEATS_PER_BAR;
@@ -398,7 +405,9 @@ export const pianoRollMode = {
 
     // ---- the roll --------------------------------------------------------
     const rollHost = document.createElement('div');
-    rollHost.className = 'overflow-auto rounded border border-current/20';
+    // w-fit so the border hugs the canvas instead of leaving a bare strip beside
+    // it; the canvas is a fixed pixel size and cannot stretch.
+    rollHost.className = 'w-fit max-w-full overflow-auto rounded border border-current/20';
 
     const fg = getComputedStyle(container).color;
     const width = Math.min(
@@ -495,14 +504,25 @@ export const pianoRollMode = {
       }
       playing = true;
       playBtn.textContent = '■ Stop';
-      io.setModeStatus(`${roll.tempo} bpm · ${roll.markend / roll.timebase} bars · loops`);
+      io.setModeStatus(`${roll.tempo} bpm · ${loopLength()} · loops`);
       roll.play(clock, onPlayEvent, roll.markstart);
     };
 
     // ---- loading a document ----------------------------------------------
+    /**
+     * Query. How long the loop is, in whichever unit does not lie.
+     *
+     * A tune whose loop ends mid-bar -- anything not in 4/4, see roll-presets.js
+     * -- has no whole number of bars to report, so it reports ticks instead of
+     * rounding to something that reads as exact and is not.
+     */
+    const loopLength = () => {
+      const bars = roll.markend / roll.timebase;
+      return Number.isInteger(bars) ? `${bars} bars` : `${roll.markend} ticks`;
+    };
+
     const describe = () => {
-      count.textContent = `${roll.sequence.length} notes · `
-        + `${roll.markend / roll.timebase} bars`;
+      count.textContent = `${roll.sequence.length} notes · ${loopLength()}`;
     };
 
     /**
@@ -518,7 +538,10 @@ export const pianoRollMode = {
       roll.tempo = doc.bpm;
       roll.sequence = toSequence(doc.notes);
       roll.markstart = 0;
-      roll.markend = barsFor(doc.notes, doc.timebase);
+      // A document may state its own loop length -- a 3/8 tune's music does not
+      // end on a 4/4 bar line. Otherwise the loop is exactly as long as the
+      // music, rounded up to a whole bar.
+      roll.markend = doc.lengthTicks ?? barsFor(doc.notes, doc.timebase);
       roll.xoffset = 0;
       roll.xrange = VISIBLE_BARS * doc.timebase;
 
