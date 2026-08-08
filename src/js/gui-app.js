@@ -20,6 +20,7 @@
 
 import { attachKeyboard } from './keyboard.js';
 import { buildPatchIndex, buildPatchTree } from './patches.js';
+import { initThemePicker, dressGenerated } from './themes.js';
 import {
   fetchSurgeData, fetchRemoteIndex, fetchRemotePatch,
   unpackInto, writeFileInto, SURGE_DATA_ROOT,
@@ -147,9 +148,13 @@ class SurgeGuiApp {
 
     setStatus('mounting Surge resources...');
     clearProgress();
-    buildPatchTree($('patch-list'),
-      buildPatchIndex(this.surgeData.files.map((f) => f.p), remotePaths, SURGE_DATA_ROOT),
-      (e) => this.loadPatch(e));
+    this.patchIndex = buildPatchIndex(
+      this.surgeData.files.map((f) => f.p), remotePaths, SURGE_DATA_ROOT);
+    buildPatchTree($('patch-list'), this.patchIndex, (e) => this.loadPatch(e));
+
+    // The skin was applied before these rows existed, so dress them now.
+    dressGenerated();
+
     const mounted = unpackInto(M.FS, this.surgeData.files, this.surgeData.bytes);
 
     if (!this.sg.init(SURGE_DATA_ROOT)) {
@@ -374,6 +379,9 @@ class SurgeGuiApp {
       onNoteOff: (note) => this.noteOff(note),
     });
 
+    // 128 keys that did not exist when the skin was applied.
+    dressGenerated();
+
     attachKeyboard({
       onNoteOn: (note, velocity) => this.noteOn(note, velocity),
       onNoteOff: (note) => this.noteOff(note),
@@ -450,6 +458,10 @@ const app = new SurgeGuiApp();
 window.__app = app;
 
 async function main() {
+  // Before anything else: the start overlay is the first thing on screen, and
+  // without a skin applied the page renders as unstyled default HTML.
+  initThemePicker($('theme-select'));
+
   $('start-btn').addEventListener('click', async () => {
     $('start-btn').disabled = true;
     try {

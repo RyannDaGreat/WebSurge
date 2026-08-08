@@ -6,6 +6,12 @@
   WebAssembly. The canvas below is painted by SurgeGUIEditor through JUCE's
   software rasterizer -- it is not a reimplementation.
 
+  The page chrome around that canvas carries NO classes in this file. Every
+  visual decision lives in js/themes.js as Tailwind utility classes, applied per
+  region at runtime, so a skin can change layout and structure and not merely
+  colour. This markup is therefore only ids and content: the skeleton a skin
+  dresses.
+
   Serve over HTTPS (AudioWorklet needs a secure context):
 
       ./run_server.sh
@@ -16,16 +22,52 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Surge XT — WebAssembly</title>
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="css/surge.css">
+
+<!--
+  Tailwind's design system IS the stylesheet here; there is no hand-written CSS.
+  This is the official browser build, which compiles utilities out of the live
+  DOM (and re-compiles when classes change, which is how switching skins works
+  with no build step). Vendored rather than hot-linked so the dump stays
+  portable and works offline; refresh it with
+
+      curl -sL https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.3.3 \
+        -o src/vendor/tailwindcss-browser-4.3.3.js
+-->
+<style type="text/tailwindcss">
+  /* REQUIRED, despite appearances. The browser build ships Tailwind inside
+     itself, so this looks redundant -- but without it the runtime emits no base
+     and no utilities at all, and the whole page falls back to unstyled HTML
+     (measured: every skin rendered as Times New Roman on transparent).
+
+     It does cost one failed request: the runtime resolves the specifier as a
+     URL first, so the console shows a 404 for /tailwindcss before it falls back
+     to the bundled copy. That request is root-relative, so it cannot be
+     satisfied from this repo on a project Pages site. Noise, not breakage. */
+  @import "tailwindcss";
+
+  /* The only rule here that is not a utility. `animate-sweep` needs a named
+     keyframes to point at, and the indeterminate progress bar -- a download
+     whose total size the server never declared -- is the one animation whose
+     shape cannot be expressed as a class. It slides a 40%-wide fill from just
+     off the left edge to just off the right. */
+  @theme {
+    --animate-sweep: sweep 1.1s ease-in-out infinite;
+    @keyframes sweep {
+      from { left: -40%; }
+      to   { left: 100%; }
+    }
+  }
+</style>
+<script src="vendor/tailwindcss-browser-4.3.3.js"></script>
 </head>
 <body>
 
-<header>
-  <h1>Surge XT</h1>
+<header id="toolbar">
+  <h1 id="brand">Surge XT</h1>
   <span id="status">loading…</span>
-  <div id="progress" class="progress" hidden></div>
+  <div id="progress" hidden></div>
   <span id="kb-state"></span>
-  <span id="unplaced" class="warn"></span>
+  <span id="unplaced"></span>
   <label class="ctl" title="Surge's skin is SVG, so this re-renders rather than upscaling">
     Zoom
     <select id="zoom-select">
@@ -39,47 +81,59 @@
   <label class="ctl" title="Render at the display's real pixel density">
     <input type="checkbox" id="retina-toggle" checked> HiDPI
   </label>
+  <label class="ctl" title="Skins are Tailwind class sets, not just palettes">
+    Skin
+    <select id="theme-select"></select>
+  </label>
   <span id="scale-info"></span>
   <button id="panic-btn" title="Silence all sounding notes">Panic</button>
 </header>
 
 <div id="error-bar" hidden></div>
 
-<main>
+<main id="main">
   <aside id="patch-list">
     <div class="patch-count">patches…</div>
   </aside>
 
   <section id="stage">
-    <!-- Sized at runtime from sgui_width()/sgui_height(), i.e. whatever size
-         Surge itself decided the editor should be. -->
-    <canvas id="surge-canvas" tabindex="0"></canvas>
+    <!-- Purely decorative, and the one element a skin may do anything it likes
+         to: stripes, grids, scanlines, gradient meshes. Never interactive. -->
+    <div id="decor"></div>
 
-    <p id="license">
-      Surge XT is free software under the
-      <a href="https://www.gnu.org/licenses/gpl-3.0.en.html">GPL v3</a>, by the
-      <a href="https://surge-synth-team.org/">Surge Synth Team</a>. This browser
-      build's source, including every patch applied to Surge and JUCE, is at
-      <a href="https://github.com/RyannDaGreat/WebSurge">github.com/RyannDaGreat/WebSurge</a>.
-    </p>
+    <div id="canvas-wrap">
+      <!-- Sized at runtime from sgui_width()/sgui_height(), i.e. whatever size
+           Surge itself decided the editor should be. -->
+      <canvas id="surge-canvas" tabindex="0"></canvas>
+    </div>
 
-    <p id="help">
-      Play with <kbd>z</kbd><kbd>x</kbd><kbd>c</kbd>…<kbd>/</kbd> and
-      <kbd>q</kbd><kbd>w</kbd><kbd>e</kbd>…<kbd>\</kbd> (white keys);
-      the row above each plays the sharps.
-      <kbd>←</kbd><kbd>→</kbd> shift octave, <kbd>↑</kbd><kbd>↓</kbd> change velocity.
-      The panel itself is Surge's real interface — click and drag it as you would the plugin.
-    </p>
+    <footer id="footer">
+      <p id="license">
+        Surge XT is free software under the
+        <a href="https://www.gnu.org/licenses/gpl-3.0.en.html">GPL v3</a>, by the
+        <a href="https://surge-synth-team.org/">Surge Synth Team</a>. This browser
+        build's source, including every patch applied to Surge and JUCE, is at
+        <a href="https://github.com/RyannDaGreat/WebSurge">github.com/RyannDaGreat/WebSurge</a>.
+      </p>
+
+      <p id="help">
+        Play with <kbd>z</kbd><kbd>x</kbd><kbd>c</kbd>…<kbd>/</kbd> and
+        <kbd>q</kbd><kbd>w</kbd><kbd>e</kbd>…<kbd>\</kbd> (white keys);
+        the row above each plays the sharps.
+        <kbd>←</kbd><kbd>→</kbd> shift octave, <kbd>↑</kbd><kbd>↓</kbd> change velocity.
+        The panel itself is Surge's real interface — click and drag it as you would the plugin.
+      </p>
+    </footer>
   </section>
 </main>
 
 <div id="piano" title="All 128 MIDI notes. Click or drag to play."></div>
 
 <div id="overlay">
-  <div class="overlay-box">
+  <div id="overlay-box">
     <h2>Surge XT</h2>
     <p>The complete Surge XT synthesizer — engine <em>and</em> interface — compiled to WebAssembly.</p>
-    <p class="dim">Browsers require a click before audio can start.</p>
+    <p>Browsers require a click before audio can start.</p>
     <button id="start-btn">Start Surge</button>
   </div>
 </div>
