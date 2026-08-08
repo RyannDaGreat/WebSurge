@@ -58,6 +58,18 @@ std::vector<uint8_t> gRgba;
 /* Peer count at the last frame; a change means a popup opened or closed. */
 int gLastPeerCount = 0;
 
+/*
+ * A timer that does nothing but count, to tell "JUCE timers are not firing"
+ * apart from "Surge's editor is declining to refresh". Diagnostics only.
+ */
+struct TickCounter : juce::Timer
+{
+    int ticks = 0;
+    void timerCallback() override { ++ticks; }
+};
+
+std::unique_ptr<TickCounter> gTicker;
+
 } // namespace
 
 extern "C"
@@ -106,6 +118,9 @@ extern "C"
         gEditor->addToDesktop (0);
         gEditor->setVisible (true);
         surgewasm::invalidateAll();
+
+        gTicker = std::make_unique<TickCounter>();
+        gTicker->startTimer (1000 / 60);
 
         return 1;
     }
@@ -320,7 +335,77 @@ extern "C"
     {
         if (! gProcessor || path == nullptr)
             return 0;
-        return gProcessor->surge->loadPatchByPath (path, -1, name ? name : "Patch") ? 1 : 0;
+
+        auto *synth = gProcessor->surge.get();
+
+        // Look the path up in Surge's own list first, exactly as
+        // SurgeSynthesizer does for a queued path load.
+        //
+        // This is not a nicety. SurgeGUIEditor decides a patch changed by
+        // comparing patchSelector->sel_id against synth->patchid, and
+        // loadPatchByPath never touches patchid -- so a load that goes straight
+        // there leaves the name in the panel reading the PREVIOUS patch even
+        // though the sound has changed. Going through loadPatch() also keeps the
+        // Category/Patch jog buttons stepping from where the user actually is.
+        int ptid = -1, ct = 0;
+
+        for (const auto &p : synth->storage.patch_list)
+        {
+            if (path_to_string (p.path) == path)
+            {
+                ptid = ct;
+                break;
+            }
+            ct++;
+        }
+
+        if (ptid >= 0)
+        {
+            synth->loadPatch (ptid);
+            synth->storage.lastLoadedPatch = synth->storage.patch_list[ptid].path;
+            return 1;
+        }
+
+        // Not in the list: a patch fetched on demand, which Surge never scanned.
+        // There is no patchid change for the editor to notice, so ask it to
+        // rebuild explicitly or the panel keeps the old name.
+        if (! synth->loadPatchByPath (path, -1, name ? name : "Patch"))
+            return 0;
+
+        synth->refresh_editor = true;
+        return 1;
+    }
+
+    /**
+     * Diagnostics for the browser tests. Not used by the app.
+     *
+     * refresh_editor is the interesting one: SurgeGUIEditor clears it the first
+     * time its idle() reaches the rebuild branch, so a value that stays 1 after
+     * a patch load proves idle() is either not running or bailing out of its
+     * `editor_open && frame && !halt_engine` guard.
+     */
+    EMSCRIPTEN_KEEPALIVE
+    int sgui_dbg_refresh_pending()
+    {
+        return (gProcessor && gProcessor->surge->refresh_editor) ? 1 : 0;
+    }
+
+    EMSCRIPTEN_KEEPALIVE
+    int sgui_dbg_patchid() { return gProcessor ? gProcessor->surge->patchid : -999; }
+
+    EMSCRIPTEN_KEEPALIVE
+    int sgui_dbg_ticks() { return gTicker ? gTicker->ticks : -1; }
+
+    EMSCRIPTEN_KEEPALIVE
+    int sgui_dbg_halt() { return (gProcessor && gProcessor->surge->halt_engine) ? 1 : 0; }
+
+    EMSCRIPTEN_KEEPALIVE
+    int sgui_dbg_headless() { return juce::Desktop::getInstance().isHeadless() ? 1 : 0; }
+
+    EMSCRIPTEN_KEEPALIVE
+    const char *sgui_dbg_patch_name()
+    {
+        return gProcessor ? gProcessor->surge->storage.getPatch().name.c_str() : "";
     }
 
 } // extern "C"

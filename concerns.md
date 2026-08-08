@@ -588,3 +588,99 @@ its data path. The wasm filesystem root is `tmp/ home/ dev/ proc` and
 because it is a separate JS index that fetches `.fxp` files on demand; Surge
 itself has never been told those patches exist. Same root cause as the unmounted
 wavetables. Not yet fixed.
+
+---
+
+## 2026-08-08 — no JUCE timer ever fired (the stale patch name)
+
+Symptom: load a patch and the sound changes, but Surge's Patch Browser keeps
+reading `Init Saw` forever. Present since the GUI port. Survived a previous
+"fix".
+
+### The previous fix was a no-op, and I said it worked
+
+`pumpMessages()` had already been given a call to
+`juce::Timer::callPendingTimersSynchronously()`, with a comment explaining that
+Surge drives its whole editor from a 60 Hz timer. The comment was correct. The
+call did nothing, and I never checked — I reasoned that adding the call fixed it
+and moved on. **That is the third time in this project a comment has documented
+behaviour the code did not have.**
+
+### Diagnosis
+
+Guessing had already cost several rounds (was it `halt_engine`? `editor_open`?
+`isHeadless()` at construction time?), so I added throwaway exports instead:
+
+    before:     {"headless":0,"halt":0,"patchid":611,"refresh":1,"ticks":0,"name":"Init Saw"}
+    after load: {"headless":0,"halt":0,"patchid":1,  "refresh":1,"ticks":0,"name":"Bass 1"}
+
+Three facts in one line:
+- the patch load itself was **perfect** — `patchid` and `name` both correct
+- `refresh_editor` stayed 1, so `SurgeGUIEditor::idle()` never reached the
+  branch that relabels the patch selector
+- a bare counting `juce::Timer` registered **0 ticks**, ever
+
+So the problem was never Surge's. No JUCE timer in the entire program had fired
+since startup.
+
+### Root cause
+
+`TimerThread::callTimers()` walks a queue sorted by `countdownMs` and breaks the
+moment the first entry is still positive. Nothing in that function decrements
+anything — the decrementing happens in `TimerThread::run()`, via
+`getTimeUntilFirstTimer(elapsed)`. An Emscripten build without `-pthread` never
+starts that thread, so every countdown stayed at its initial value and
+`callTimers()` broke on the first entry on every single call. Not late. Never.
+
+Fix, in `patches/juce-emscripten.patch`: under `#if JUCE_WASM`,
+`callTimersSynchronously()` now bills the queue for the wall-clock time since
+the previous pump before calling `callTimers()` — exactly what `run()` would
+have done. The page's animation frame becomes the run loop.
+
+Verified: ticks 7 -> 96 -> 336 over 5.5 s (~60 Hz), `refresh_editor` clears, and
+the panel reads `Bass 1 / Category: Basses / By: Claes`.
+
+### What this had been silently breaking
+
+Everything idle-driven, not just the name: VU meters, value readouts, the
+modulation display, anything Surge updates from `idle()` rather than painting on
+demand. It looked like a working GUI because clicks still routed through the
+message queue, which is a *separate* mechanism and did work.
+
+**Lesson: "I added the call that should fix it" is not a test. A one-line
+counter would have found this months earlier — and the counter is now a shipped
+export (`sgui_dbg_ticks`) precisely so a regression is visible instead of
+subtle.**
+
+---
+
+## 2026-08-08 — all 3559 patches, and two bugs found by shipping them
+
+Only the 639 factory patches were being offered, because the 3rd-party bank is
+241 MB. That was my call and it was never what was asked for.
+
+Both banks now ship, by different routes: factory + wavetables in the startup
+archive (Surge scans a directory in `SurgeStorage`'s **constructor**, so
+anything its own browser and jog buttons must see has to be present before the
+synth exists), and the 2920 3rd-party patches as loose files fetched on click.
+All 3559 in one archive would be a 271 MB download before the first note.
+
+Two bugs surfaced only because this was tested end to end in a browser:
+
+**Emscripten's ErrnoError is shaped differently per build.** Directories were
+created with mkdir-and-catch-`EEXIST`. Emscripten only populates `.code` and
+`.message` when built **with assertions** — the GUI module has them, the engine
+module does not. So the engine raised a bare `{errno: 20}`, the string
+comparison did not match, and the guard rethrew on a directory that already
+existed. Worse, `errno 20` here is `EEXIST`, not `ENOTDIR` as the Linux value
+would suggest, which sent me down a wrong path until I probed the actual object.
+Now existence is *tested* before `mkdir`, so there is no catch to get wrong and
+a genuine failure still propagates.
+
+**A caught error reported as `undefined`.** The above surfaced as
+`Loading "808er Than 808" failed: undefined`, because `err.message` does not
+exist on an ErrnoError either. There is now a `describeError` helper.
+
+**Lesson: two Emscripten modules built from one project are not the same
+runtime. Assertions change the shape of thrown objects, and error-handling code
+that works in one module can fail in the other.**

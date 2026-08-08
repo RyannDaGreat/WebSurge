@@ -1,13 +1,26 @@
 # target: libs/JUCE
 #
 # Emscripten/WASM support for JUCE 8.0.12.
+#
 # JUCE 8 defines JUCE_WASM and ships juce_SystemStats_wasm.cpp, but the target is
-# incomplete. This adds: emscripten.h include, WASM thread-priority entries,
-# wasm-before-linux platform detection (host projects define LINUX), the WASM
-# branches in juce_core/juce_events/juce_graphics/juce_gui_basics pointing at
-# host/surge_wasm/, NativeImageType for wasm, a PluginHostType case, a
-# PropertiesFile case, and narrowing a posix guard so updateStatInfoForFile
-# stays available. Upstreamable.
+# incomplete. This adds:
+#
+#   - the emscripten.h include and WASM thread-priority entries
+#   - wasm-before-linux platform detection (host projects define LINUX)
+#   - WASM branches in juce_core/juce_events/juce_graphics/juce_gui_basics
+#     pointing at host/surge_wasm/
+#   - NativeImageType for wasm, a PluginHostType case, a PropertiesFile case
+#   - a narrowed posix guard so updateStatInfoForFile stays available
+#   - firing timers from the synchronous pump
+#
+# That last one is the subtle one. JUCE decrements every timer's countdown from
+# the timer THREAD's run loop, and an Emscripten build without -pthread never
+# starts that thread -- so callPendingTimersSynchronously() found the first
+# countdown still positive, broke out immediately, and no JUCE timer ever fired.
+# Surge drives its entire editor from a 60 Hz timer, so the panel rendered but
+# never refreshed anything idle-driven.
+#
+# All upstreamable.
 diff --git a/modules/juce_audio_processors/utilities/juce_PluginHostType.cpp b/modules/juce_audio_processors/utilities/juce_PluginHostType.cpp
 index 7ce6bf5..e96ffde 100644
 --- a/modules/juce_audio_processors/utilities/juce_PluginHostType.cpp
@@ -177,6 +190,43 @@ index 7961481..69f55f6 100644
  #elif JUCE_ANDROID
   #include "native/juce_Messaging_android.cpp"
  
+diff --git a/modules/juce_events/timers/juce_Timer.cpp b/modules/juce_events/timers/juce_Timer.cpp
+index ce45c31..d27d854 100644
+--- a/modules/juce_events/timers/juce_Timer.cpp
++++ b/modules/juce_events/timers/juce_Timer.cpp
+@@ -181,9 +181,32 @@ public:
+ 
+     void callTimersSynchronously()
+     {
++       #if JUCE_WASM
++        /*
++         * There is no timer thread here.
++         *
++         * run() is what normally charges every timer for the time that has
++         * passed, and an Emscripten build without -pthread never starts it. So
++         * callTimers() below would find countdownMs still positive on the first
++         * timer, break out of its loop immediately, and fire nothing -- not
++         * late, but never, for the lifetime of the program.
++         *
++         * Do what run() does: bill the queue for the wall-clock time since the
++         * last pump. The page's animation frame is the run loop.
++         */
++        const auto nowMs = Time::getMillisecondCounter();
++        getTimeUntilFirstTimer ((int) (nowMs >= lastSyncMs ? nowMs - lastSyncMs : 0));
++        lastSyncMs = nowMs;
++       #endif
++
+         callTimers();
+     }
+ 
++   #if JUCE_WASM
++    /* When callTimersSynchronously() last ran, to measure elapsed time against. */
++    uint32 lastSyncMs = Time::getMillisecondCounter();
++   #endif
++
+     void addTimer (Timer* t)
+     {
+         const LockType::ScopedLockType sl (lock);
 diff --git a/modules/juce_graphics/images/juce_Image.cpp b/modules/juce_graphics/images/juce_Image.cpp
 index 2aef206..8e6cfd8 100644
 --- a/modules/juce_graphics/images/juce_Image.cpp
