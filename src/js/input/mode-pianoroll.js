@@ -1,268 +1,604 @@
 /**
- * mode-pianoroll.js -- a step grid you draw notes into.
+ * mode-pianoroll.js -- a real piano roll, driving Surge.
  *
- * Click a cell to place a note, drag across to lengthen it, click it again to
- * remove it. Play loops the pattern.
+ * THE ROLL IS NOT OURS
+ * --------------------
+ * The grid, the scrolling, the ruler, the keyboard gutter, note drag/resize/
+ * select/delete, the loop markers and the play cursor all come from
+ * `webaudio-pianoroll` by Tatsuya Shinyagaito (g200kg), vendored at
+ * src/vendor/webaudio-pianoroll-0.6.0.js. This file is the seam between that
+ * component and Surge, and nothing more. An earlier version of this mode was a
+ * hand-rolled 16x13 cell grid; it was deleted, because a half-built piano roll
+ * is worse than a finished one somebody else already wrote.
+ *
+ * WHAT THE COMPONENT DOES AND DOES NOT DO
+ * ---------------------------------------
+ * It is a UI plus a scheduler. It makes no sound at all. `play()` walks the
+ * sequence and calls back with `{t, g, n}` -- note-on time, note-off time, note
+ * number -- ahead of when they are due, and everything after that is ours.
+ *
+ * THE CLOCK, AND WHY IT IS NOT AN AudioContext
+ * --------------------------------------------
+ * `play(actx, callback, tick)` is documented to take an AudioContext, but the
+ * pinned source touches it in exactly two places and both read `.currentTime`
+ * (lines 168 and 213 of the vendored file) -- it never creates a node, never
+ * connects anything, never schedules on the audio graph. It wants a clock.
+ *
+ * So it gets a clock, backed by `performance.now()`. Three reasons, in order of
+ * how much they matter:
+ *
+ *  1. We have to turn its scheduled times into `setTimeout` delays, because
+ *     `io.noteOn` posts to the worklet immediately and the worklet has no
+ *     timestamped event queue to schedule into. Subtracting an audio-clock
+ *     reading from a wall-clock deadline mixes two clocks that drift apart, and
+ *     the error lands in the timing of every note. Using `performance.now()`
+ *     for both sides makes that conversion exact.
+ *  2. `io` -- {noteOn, noteOff, allNotesOff, setModeStatus} -- is the whole
+ *     surface a mode gets, deliberately, and it does not include the app's
+ *     AudioContext. Reaching through a global to get one would be going around
+ *     the seam for a number we can compute.
+ *  3. Constructing a second AudioContext costs a real output stream on some
+ *     platforms, for a clock we would then only read.
  *
  * TIMING, HONESTLY
  * ----------------
- * Playback is driven by requestAnimationFrame and sends note-on/note-off through
- * the same postMessage path the computer keyboard uses. That is fine for
- * sketching and audibly loose for anything else: the messages cross to the audio
- * thread whenever they cross, so a step can land a few milliseconds early or
- * late and the amount varies. It is NOT sample-accurate and must not be
- * described as a sequencer.
+ * Better than the grid this replaced, still not sample-accurate. The component
+ * schedules from a monotonic clock instead of accumulating per-frame error, so
+ * there is no drift over a long loop. But the final hop is `setTimeout` plus a
+ * `postMessage` to the audio thread, so each note lands within a few
+ * milliseconds of where it should and the amount varies. Good for writing and
+ * hearing music; not a sequencer, and it must not be described as one.
  *
- * Making it accurate needs a timestamped event queue inside the worklet, so that
- * events are scheduled ahead in audio time and drained per block rather than
- * played on arrival. That is a change to surge-worklet.js, not to this file, and
- * this mode will feed it unchanged when it exists.
+ * The fix is unchanged and is not in this file: a timestamped event queue inside
+ * surge-worklet.js, so events are scheduled ahead in audio time and drained per
+ * block. This mode already knows each note's deadline and would pass it through
+ * without restructuring.
+ *
+ * WHAT WE FOUND OUT ABOUT THE COMPONENT, THAT ITS README DOES NOT SAY
+ * ------------------------------------------------------------------
+ *  - The README's default `editmode` is "gridmono"; the source's is "dragpoly".
+ *    The source wins. We ask for "dragpoly" explicitly rather than rely on it.
+ *  - `loop` is a declared attribute that is never read anywhere in the source.
+ *    Playback ALWAYS loops from `markend` back to `markstart`. There is no
+ *    one-shot mode and no end-of-sequence callback, so Play runs until Stop.
+ *  - Note events carry no velocity. The sequence entries are `{t, n, g, f}` and
+ *    the play callback gets `{t, g, n}`, so a per-note velocity cannot be
+ *    recovered at playback time even if we stored one. Every note plays at
+ *    VELOCITY. Imported MIDI velocities are parsed and then dropped here.
+ *  - `stop()` clears its interval and nothing else: no note-offs, no cursor
+ *    reset. Releasing what is sounding is the caller's job.
+ *  - Properties are defined in `connectedCallback` from the element's
+ *    attributes, so setting a property before the element is in the DOM has no
+ *    effect. Attributes first, then append, then properties.
+ *  - `ready()` finds its internal parts by child index (`root.children[1]`,
+ *    `root.childNodes[2]`). Nothing may be inserted into the element.
+ *  - It renders to a canvas, so its colours are strings it paints with and
+ *    cannot be `currentColor`. They are computed from the skin's text colour at
+ *    mount; see rgbaFrom below.
+ *  - Its `<style>` is injected unscoped (the shadow-DOM path is commented out
+ *    in the source), defining `.pianoroll`, `.marker` and four `#wac-*` ids.
+ *    Checked: the app uses none of those names.
+ *  - `disconnectedCallback` is empty. During a drag it holds window-level
+ *    mousemove/mouseup listeners, which it removes on mouseup. A mode torn down
+ *    mid-drag would leak them; destroy() cannot reach them.
+ *
+ * Licence: webaudio-pianoroll is Apache-2.0, which is one-way compatible with
+ * this project's GPLv3.
  */
 
 'use strict';
 
-/** Rows, top to bottom, as semitone offsets above the grid's base note. */
-const SEMITONES = [12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0];
+import { PRESETS, barsFor } from './roll-presets.js';
+import { parseMidi } from './midi-file.js';
 
-/** Columns in the pattern. Sixteen sixteenths is one 4/4 bar. */
-const STEPS = 16;
+/**
+ * Where the vendored component is, resolved against THIS FILE's URL.
+ *
+ * Two levels up, not one: this module lives at js/input/, so `../vendor` would
+ * resolve to js/vendor and 404. Same trap as mode-notation.js.
+ *
+ * Provenance -- webaudio-pianoroll 0.6.0, Apache-2.0, g200kg, repo commit
+ * 523bc10e4b7e5d0a70b20caaeff5c14e4864c9de (2022-12-20). To refresh:
+ *   curl -sSL -o src/vendor/webaudio-pianoroll-0.6.0.js \
+ *     https://raw.githubusercontent.com/g200kg/webaudio-pianoroll/master/webaudio-pianoroll.js
+ * sha256 940fedddb1b4997e2d92115bcb0169e55b870a94a42893a114d395e3a3de06d8
+ */
+const PIANOROLL_URL = '../../vendor/webaudio-pianoroll-0.6.0.js';
 
-/** Steps per beat, for turning BPM into a step duration. */
-const STEPS_PER_BEAT = 4;
+/** The custom element the vendored file defines. */
+const ELEMENT_NAME = 'webaudio-pianoroll';
 
-const DEFAULT_BPM = 110;
+/** Which preset the mode opens on, so it is never an empty box. */
+const STARTER_PRESET = 'Ode to Joy';
+
 const MIN_BPM = 40;
 const MAX_BPM = 240;
 
-/** Base note of the lowest row. C4, so the grid sits where a sketch wants it. */
-const DEFAULT_BASE_NOTE = 60;
-
+/** Every note plays at this velocity; the component carries none. See above. */
 const VELOCITY = 100;
 
-const SECONDS_PER_MINUTE = 60;
+const MS_PER_SECOND = 1000;
 
-/** Note names for the row gutter. */
-const NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+/** 4/4 is assumed when converting a MIDI file's ticks-per-quarter into bars. */
+const BEATS_PER_BAR = 4;
+
+/** How far ahead the component hands us events, in seconds. */
+const PRELOAD_SECONDS = 0.5;
+
+/** Roll geometry, in px. Width is fitted to the panel between these bounds. */
+const ROLL_HEIGHT_PX = 340;
+const MIN_ROLL_WIDTH_PX = 460;
+const MAX_ROLL_WIDTH_PX = 1180;
+/** The wrapper's p-3 padding, both sides, subtracted from the panel width. */
+const ROLL_INSET_PX = 24;
+
+/** Bars visible at once before the roll scrolls horizontally. */
+const VISIBLE_BARS = 4;
+
+/** Vertical view: never show fewer semitones than this, and pad the fit. */
+const MIN_PITCH_SPAN = 25;
+const PITCH_PADDING = 2;
+
+const MIDI_NOTE_MIN = 0;
+const MIDI_NOTE_MAX = 127;
 
 /**
- * Pure function. Milliseconds one step lasts at a tempo.
- *
- * @param {number} bpm
- * @returns {number} milliseconds
- *
- * @example stepMs(120)  // 125  -- a sixteenth at 120bpm
- * @example stepMs(60)   // 250
+ * Opacities the roll is painted with, all applied to the skin's text colour so
+ * the roll reads the same on Frosted Glass as on Paper & Ink.
  */
-export function stepMs(bpm) {
-  return (SECONDS_PER_MINUTE * 1000) / (bpm * STEPS_PER_BEAT);
+const ALPHA_ROW_LIGHT = 0.06;
+const ALPHA_ROW_DARK = 0.15;
+const ALPHA_GRID = 0.25;
+const ALPHA_NOTE = 0.7;
+const ALPHA_NOTE_BORDER = 0.9;
+const ALPHA_NOTE_SELECTED = 0.4;
+const ALPHA_RULER_BG = 0.1;
+const ALPHA_RULER_BORDER = 0.3;
+const ALPHA_SELECT_AREA = 0.2;
+
+/**
+ * Pure function. Restates a CSS colour at a different opacity.
+ *
+ * The roll paints onto a canvas, so it needs literal colour strings and cannot
+ * take `currentColor` or a Tailwind `/30` suffix. Everything it draws is
+ * therefore the skin's own text colour at some opacity, which is what
+ * `border-current/30` means elsewhere in the app, computed rather than declared.
+ *
+ * @param {string} color - any `rgb()`/`rgba()` string, as getComputedStyle returns
+ * @param {number} alpha - 0..1
+ * @returns {string} an `rgba()` string
+ *
+ * @example rgbaFrom('rgb(226, 232, 240)', 0.25)     // 'rgba(226, 232, 240, 0.25)'
+ * @example rgbaFrom('rgba(15, 23, 42, 0.9)', 0.06)  // 'rgba(15, 23, 42, 0.06)'
+ */
+export function rgbaFrom(color, alpha) {
+  const parts = color.match(/-?[\d.]+/g);
+  if (!parts || parts.length < 3) {
+    throw new Error(`Cannot read a colour out of "${color}" to tint the piano roll`);
+  }
+  const [r, g, b] = parts;
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
 /**
- * Pure function. Is this semitone a black key?
+ * Pure function. Turns our note list into webaudio-pianoroll's sequence array.
  *
- * @param {number} semitone - offset from C, any sign
- * @returns {boolean}
+ * Its entries are `{t: startTick, n: noteNumber, g: lengthTicks}` plus `f`, the
+ * selected flag its drawing code reads. Sorted by tick because `findNextEv`
+ * scans forward and stops at the first event at or after the cursor, so an
+ * unsorted sequence silently drops notes during playback.
  *
- * @example isBlack(1)   // true  (C#)
- * @example isBlack(12)  // false (C, an octave up)
+ * @param {Array<{pitch: number, start: number, length: number}>} notes
+ * @returns {Array<{t: number, n: number, g: number, f: number}>}
+ *
+ * @example toSequence([{pitch: 60, start: 4, length: 2}])
+ * // [{t: 4, n: 60, g: 2, f: 0}]
+ *
+ * @example toSequence([{pitch: 64, start: 8, length: 4}, {pitch: 60, start: 0, length: 4}])
+ * // [{t: 0, n: 60, g: 4, f: 0}, {t: 8, n: 64, g: 4, f: 0}]
  */
-export function isBlack(semitone) {
-  return [1, 3, 6, 8, 10].includes(((semitone % 12) + 12) % 12);
+export function toSequence(notes) {
+  return notes
+    .map((n) => ({ t: n.start, n: n.pitch, g: n.length, f: 0 }))
+    .sort((a, b) => a.t - b.t || a.n - b.n);
+}
+
+/**
+ * Pure function. The vertical view window that fits a note list.
+ *
+ * `yoffset` is the note number at the BOTTOM edge of the roll and `yrange` the
+ * number of semitones shown, so a piece is framed by finding its lowest note
+ * and counting up. Narrow pieces get widened to MIN_PITCH_SPAN rather than
+ * zoomed until three rows fill the panel.
+ *
+ * @param {Array<{pitch: number}>} notes
+ * @returns {{yoffset: number, yrange: number}}
+ *
+ * @example pitchWindow([{pitch: 60}, {pitch: 72}])  // {yoffset: 58, yrange: 25}
+ * @example pitchWindow([])                          // {yoffset: 48, yrange: 25}
+ *
+ * @example
+ * // a four-octave piece is shown whole, not clipped to the minimum span
+ * pitchWindow([{pitch: 36}, {pitch: 84}])  // {yoffset: 34, yrange: 53}
+ */
+export function pitchWindow(notes) {
+  if (!notes.length) {
+    // Middle of the keyboard, where a sketch wants to start drawing.
+    return { yoffset: 48, yrange: MIN_PITCH_SPAN };
+  }
+  const pitches = notes.map((n) => n.pitch);
+  const lo = Math.min(...pitches) - PITCH_PADDING;
+  const hi = Math.max(...pitches) + PITCH_PADDING;
+
+  const span = Math.max(MIN_PITCH_SPAN, hi - lo + 1);
+  const centre = (lo + hi) / 2;
+  const bottom = Math.round(centre - span / 2);
+
+  return {
+    yoffset: Math.min(Math.max(MIDI_NOTE_MIN, bottom), MIDI_NOTE_MAX - span),
+    yrange: span,
+  };
+}
+
+/**
+ * Pure function. Turns a parsed MIDI file into a roll document.
+ *
+ * The file's own division becomes the roll's tick resolution, so import is
+ * lossless: a 480-ticks-per-quarter file gets timebase 1920 and every onset
+ * lands exactly where it was written, with no quantisation. 4/4 is assumed --
+ * the file's time-signature meta event is not read, so a 3/4 piece will import
+ * with correct note positions and misplaced bar lines.
+ *
+ * @param {object} midi - what parseMidi returned
+ * @param {string} label - shown in the preset picker, normally the file name
+ * @returns {{name, bpm, timebase, grid, snap, notes, note}} a roll document
+ *
+ * @example
+ * midiToDoc({division: 480, tempoBpm: 90, tempoChanges: 0, unterminated: 0,
+ *            notes: [{pitch: 60, start: 0, length: 480, velocity: 64}]}, 'x.mid')
+ * // {name: 'x.mid', bpm: 90, timebase: 1920, grid: 480, snap: 120,
+ * //  notes: [{pitch: 60, start: 0, length: 480}],
+ * //  note: 'Imported from x.mid: 1 notes, 480 ticks per quarter, 90.0 bpm.'}
+ */
+export function midiToDoc(midi, label) {
+  const timebase = midi.division * BEATS_PER_BAR;
+  const caveats = [];
+  if (midi.tempoChanges) {
+    caveats.push(`${midi.tempoChanges} later tempo change(s) ignored -- the roll has one tempo`);
+  }
+  if (midi.unterminated) {
+    caveats.push(`${midi.unterminated} note(s) were never released and end at the last event`);
+  }
+
+  return {
+    name: label,
+    bpm: midi.tempoBpm,
+    timebase,
+    grid: midi.division,
+    snap: Math.max(1, Math.round(midi.division / BEATS_PER_BAR)),
+    notes: midi.notes.map((n) => ({ pitch: n.pitch, start: n.start, length: n.length })),
+    note: `Imported from ${label}: ${midi.notes.length} notes, ${midi.division} ticks `
+      + `per quarter, ${midi.tempoBpm.toFixed(1)} bpm.`
+      + (caveats.length ? ` Caveats: ${caveats.join('; ')}.` : '')
+      + ' Velocities were read but the roll cannot play them; every note sounds at '
+      + `velocity ${VELOCITY}.`,
+  };
+}
+
+/**
+ * Query. Loads the vendored component once and resolves when it is registered.
+ *
+ * It is a plain script that calls `customElements.define` at top level rather
+ * than a module, so there is nothing to import; the signal that it is ready is
+ * the element being defined. The promise is cached on the module so a second
+ * mount does not refetch, and so two mounts cannot race into a double
+ * `define()` -- which throws, unlike a duplicate import.
+ *
+ * @returns {Promise<void>}
+ */
+let pianorollPromise = null;
+function loadPianoroll() {
+  if (pianorollPromise) return pianorollPromise;
+
+  pianorollPromise = new Promise((resolve, reject) => {
+    if (customElements.get(ELEMENT_NAME)) { resolve(); return; }
+
+    const script = document.createElement('script');
+    script.src = new URL(PIANOROLL_URL, import.meta.url).href;
+    script.onload = () => {
+      if (!customElements.get(ELEMENT_NAME)) {
+        reject(new Error(`${script.src} loaded but defined no <${ELEMENT_NAME}>`));
+      } else {
+        resolve();
+      }
+    };
+    script.onerror = () => reject(new Error(`Could not load ${script.src}`));
+    document.head.append(script);
+  });
+  return pianorollPromise;
 }
 
 export const pianoRollMode = {
   id: 'pianoroll',
   label: 'Piano roll',
-  hint: 'Click cells to place notes. Space plays the loop.',
+  hint: 'Drag to draw notes, drag their edges to resize. Space plays the loop.',
 
   /**
-   * Command. Builds the grid and its transport.
+   * Command. Builds the roll, its transport, the preset picker and MIDI import.
    *
    * @param {HTMLElement} container
    * @param {object} io - {noteOn, noteOff, allNotesOff, setModeStatus}
-   * @returns {Promise<{destroy: () => void}>}
+   * @returns {Promise<{destroy: () => void, shortcuts: Array<object>}>}
    */
   async mount(container, io) {
-    /** Which cells are filled: a Set of `${row}:${step}` keys. */
-    const filled = new Set();
-    const cells = new Map();
+    const wrap = document.createElement('div');
+    wrap.className = 'flex flex-col gap-2 p-3';
+    container.append(wrap);
 
-    let bpm = DEFAULT_BPM;
-    let playing = false;
-    let rafId = null;
-    let stepIndex = 0;
-    let lastStepAt = 0;
-    const sounding = new Set();
+    const loading = document.createElement('p');
+    loading.className = 'text-xs opacity-60';
+    loading.textContent = 'Loading piano roll…';
+    wrap.append(loading);
+
+    await loadPianoroll();
+    loading.remove();
 
     // ---- transport -------------------------------------------------------
     const bar = document.createElement('div');
-    bar.className = 'flex items-center gap-3 pb-2 text-xs';
+    bar.className = 'flex flex-wrap items-center gap-3 text-xs';
 
     const playBtn = document.createElement('button');
-    playBtn.className = 'rounded border border-current/30 px-3 py-1 font-semibold ' +
-      'transition hover:opacity-80';
+    playBtn.className = 'rounded border border-current/30 px-3 py-1 font-semibold '
+      + 'transition hover:opacity-80';
     playBtn.textContent = '▶ Play';
 
     const tempo = document.createElement('input');
     tempo.type = 'range';
     tempo.min = String(MIN_BPM);
     tempo.max = String(MAX_BPM);
-    tempo.value = String(bpm);
-    tempo.className = 'w-32 accent-current';
+    tempo.className = 'w-28 accent-current';
 
     const tempoLabel = document.createElement('span');
     tempoLabel.className = 'w-16 font-mono opacity-70';
-    tempoLabel.textContent = `${bpm} bpm`;
+
+    const presetSelect = document.createElement('select');
+    presetSelect.className = 'rounded border border-current/30 bg-transparent px-2 py-1';
+    for (const preset of PRESETS) {
+      const option = document.createElement('option');
+      option.value = preset.name;
+      option.textContent = preset.name;
+      presetSelect.append(option);
+    }
+
+    // A file input styled as a button: the raw control cannot be made to sit on
+    // twelve different skins, but a label wrapping a hidden input can.
+    const midiInput = document.createElement('input');
+    midiInput.type = 'file';
+    midiInput.accept = '.mid,.midi,audio/midi';
+    midiInput.className = 'hidden';
+
+    const midiLabel = document.createElement('label');
+    midiLabel.className = 'cursor-pointer rounded border border-current/30 px-3 py-1 '
+      + 'transition hover:opacity-80';
+    midiLabel.textContent = 'Import MIDI…';
+    midiLabel.append(midiInput);
 
     const clearBtn = document.createElement('button');
     clearBtn.className = 'rounded border border-current/30 px-3 py-1 transition hover:opacity-80';
     clearBtn.textContent = 'Clear';
 
-    bar.append(playBtn, tempo, tempoLabel, clearBtn);
+    const count = document.createElement('span');
+    count.className = 'font-mono opacity-60';
 
-    // ---- grid ------------------------------------------------------------
-    const grid = document.createElement('div');
-    grid.className = 'inline-grid gap-px select-none';
-    grid.style.gridTemplateColumns = `2.5rem repeat(${STEPS}, minmax(0, 1.4rem))`;
+    bar.append(playBtn, tempo, tempoLabel, presetSelect, midiLabel, clearBtn, count);
 
-    const noteFor = (row) => DEFAULT_BASE_NOTE + SEMITONES[row];
+    // Where each preset says what it is and is not. See roll-presets.js.
+    const provenance = document.createElement('p');
+    provenance.className = 'text-[11px] leading-snug opacity-60';
 
-    SEMITONES.forEach((semi, rowIndex) => {
-      const gutter = document.createElement('div');
-      gutter.className = 'pr-2 text-right font-mono text-[10px] leading-5 opacity-50';
-      gutter.textContent = `${NAMES[((semi % 12) + 12) % 12]}${Math.floor(noteFor(rowIndex) / 12) - 1}`;
-      grid.append(gutter);
+    // ---- the roll --------------------------------------------------------
+    const rollHost = document.createElement('div');
+    rollHost.className = 'overflow-auto rounded border border-current/20';
 
-      for (let step = 0; step < STEPS; step++) {
-        const cell = document.createElement('button');
-        cell.dataset.key = `${rowIndex}:${step}`;
-        // Beat boundaries get a stronger edge so 4/4 is readable at a glance.
-        const beatEdge = step % STEPS_PER_BEAT === 0 ? 'border-l-current/40' : 'border-l-current/10';
-        cell.className = 'h-5 border-l transition-colors ' + beatEdge + ' ' +
-          (isBlack(semi) ? 'bg-current/8' : 'bg-current/15');
-        cells.set(cell.dataset.key, cell);
-        grid.append(cell);
-      }
-    });
+    const fg = getComputedStyle(container).color;
+    const width = Math.min(
+      MAX_ROLL_WIDTH_PX,
+      Math.max(MIN_ROLL_WIDTH_PX, (container.clientWidth || MIN_ROLL_WIDTH_PX) - ROLL_INSET_PX),
+    );
 
-    const paint = () => {
-      for (const [key, cell] of cells) {
-        cell.classList.toggle('bg-current/70', filled.has(key));
-      }
-    };
-
-    // ---- drawing ---------------------------------------------------------
-    let drawing = null; // 'add' | 'remove', fixed at pointerdown
-
-    const cellAt = (target) => (target instanceof HTMLElement ? target.dataset.key : undefined);
-
-    const applyAt = (key) => {
-      if (!key) return;
-      if (drawing === 'add') filled.add(key);
-      else filled.delete(key);
-      paint();
-    };
-
-    const onPointerDown = (e) => {
-      const key = cellAt(e.target);
-      if (!key) return;
-      // Whether a drag adds or removes is decided by the first cell, so dragging
-      // across a mixed run does not flip each cell it crosses.
-      drawing = filled.has(key) ? 'remove' : 'add';
-      applyAt(key);
-
-      // Capture is an optimisation for dragging, not a requirement for the
-      // click that just happened. A synthetic event -- from a test, or from
-      // assistive tech -- carries no live pointer and throws here, which would
-      // otherwise take down the handler after the cell was already filled.
-      if (grid.hasPointerCapture || e.isTrusted) {
-        try {
-          grid.setPointerCapture(e.pointerId);
-        } catch {
-          // No active pointer to capture; dragging just will not track.
-        }
-      }
-      e.preventDefault();
-    };
-
-    const onPointerMove = (e) => {
-      if (!drawing || !e.buttons) return;
-      // Capture retargets events to the grid, so hit-test by coordinate.
-      applyAt(cellAt(document.elementFromPoint(e.clientX, e.clientY)));
-    };
-
-    const onPointerUp = () => { drawing = null; };
-
-    grid.addEventListener('pointerdown', onPointerDown);
-    grid.addEventListener('pointermove', onPointerMove);
-    grid.addEventListener('pointerup', onPointerUp);
-    grid.addEventListener('pointercancel', onPointerUp);
+    // Attributes, not properties: the component reads these once, in
+    // connectedCallback, to seed the properties it then defines.
+    const roll = document.createElement(ELEMENT_NAME);
+    for (const [key, value] of Object.entries({
+      width,
+      height: ROLL_HEIGHT_PX,
+      editmode: 'dragpoly',
+      xscroll: 1,
+      yscroll: 1,
+      wheelzoom: 1,
+      preload: PRELOAD_SECONDS,
+      collt: rgbaFrom(fg, ALPHA_ROW_LIGHT),
+      coldk: rgbaFrom(fg, ALPHA_ROW_DARK),
+      colgrid: rgbaFrom(fg, ALPHA_GRID),
+      colnote: rgbaFrom(fg, ALPHA_NOTE),
+      colnoteborder: rgbaFrom(fg, ALPHA_NOTE_BORDER),
+      colnotesel: rgbaFrom(fg, ALPHA_NOTE_SELECTED),
+      colnoteselborder: rgbaFrom(fg, ALPHA_NOTE_BORDER),
+      colrulerbg: rgbaFrom(fg, ALPHA_RULER_BG),
+      colrulerfg: fg,
+      colrulerborder: rgbaFrom(fg, ALPHA_RULER_BORDER),
+      colselarea: rgbaFrom(fg, ALPHA_SELECT_AREA),
+    })) {
+      roll.setAttribute(key, String(value));
+    }
+    rollHost.append(roll);
+    wrap.append(bar, provenance, rollHost);
 
     // ---- playback --------------------------------------------------------
+    /**
+     * The clock handed to `roll.play()`. See the file header for why this is
+     * `performance.now()` and not an AudioContext.
+     */
+    const clock = { get currentTime() { return performance.now() / MS_PER_SECOND; } };
+
+    /** Pending note-on/note-off timers, so Stop can cancel what is in flight. */
+    const timers = new Set();
+
+    /**
+     * Pitches currently sounding, counted rather than flagged: the same pitch
+     * can legitimately be on twice at once, and a Set would let the first
+     * release forget the second note, leaving it hanging after Stop.
+     */
+    const sounding = new Map();
+
+    let playing = false;
+
+    const scheduleAt = (seconds, run) => {
+      const delay = Math.max(0, seconds * MS_PER_SECOND - performance.now());
+      const id = setTimeout(() => { timers.delete(id); run(); }, delay);
+      timers.add(id);
+    };
+
+    const onPlayEvent = (ev) => {
+      scheduleAt(ev.t, () => {
+        io.noteOn(ev.n, VELOCITY);
+        sounding.set(ev.n, (sounding.get(ev.n) ?? 0) + 1);
+      });
+      scheduleAt(ev.g, () => {
+        io.noteOff(ev.n);
+        const held = (sounding.get(ev.n) ?? 0) - 1;
+        if (held > 0) sounding.set(ev.n, held);
+        else sounding.delete(ev.n);
+      });
+    };
+
     const releaseAll = () => {
-      for (const note of sounding) io.noteOff(note);
+      for (const note of sounding.keys()) io.noteOff(note);
       sounding.clear();
-    };
-
-    const highlight = (index) => {
-      for (const [key, cell] of cells) {
-        cell.classList.toggle('ring-1', playing && Number(key.split(':')[1]) === index);
-        cell.classList.toggle('ring-current/60', playing && Number(key.split(':')[1]) === index);
-      }
-    };
-
-    const advance = (now) => {
-      if (!playing) return;
-
-      if (now - lastStepAt >= stepMs(bpm)) {
-        lastStepAt = now;
-        releaseAll();
-
-        SEMITONES.forEach((_, rowIndex) => {
-          if (!filled.has(`${rowIndex}:${stepIndex}`)) return;
-          const note = noteFor(rowIndex);
-          io.noteOn(note, VELOCITY);
-          sounding.add(note);
-        });
-
-        highlight(stepIndex);
-        stepIndex = (stepIndex + 1) % STEPS;
-      }
-      rafId = requestAnimationFrame(advance);
     };
 
     const stop = () => {
       playing = false;
-      if (rafId !== null) cancelAnimationFrame(rafId);
-      rafId = null;
+      roll.stop();
+      for (const id of timers) clearTimeout(id);
+      timers.clear();
       releaseAll();
-      highlight(-1);
+      roll.locate(roll.markstart);
       playBtn.textContent = '▶ Play';
       io.setModeStatus('');
     };
 
     const start = () => {
+      if (!roll.sequence.length) {
+        io.setModeStatus('nothing to play — draw some notes or pick a preset');
+        return;
+      }
       playing = true;
-      stepIndex = 0;
-      lastStepAt = 0;
       playBtn.textContent = '■ Stop';
-      io.setModeStatus(`${bpm} bpm · ${STEPS} steps`);
-      rafId = requestAnimationFrame(advance);
+      io.setModeStatus(`${roll.tempo} bpm · ${roll.markend / roll.timebase} bars · loops`);
+      roll.play(clock, onPlayEvent, roll.markstart);
     };
 
-    playBtn.addEventListener('click', () => (playing ? stop() : start()));
-    clearBtn.addEventListener('click', () => { filled.clear(); paint(); });
-    tempo.addEventListener('input', () => {
-      bpm = Number(tempo.value);
-      tempoLabel.textContent = `${bpm} bpm`;
-      if (playing) io.setModeStatus(`${bpm} bpm · ${STEPS} steps`);
-    });
+    // ---- loading a document ----------------------------------------------
+    const describe = () => {
+      count.textContent = `${roll.sequence.length} notes · `
+        + `${roll.markend / roll.timebase} bars`;
+    };
 
-    const wrap = document.createElement('div');
-    wrap.className = 'flex flex-col overflow-auto p-3';
-    wrap.append(bar, grid);
-    container.append(wrap);
-    paint();
+    /**
+     * Command. Resets the roll to a document. See roll-presets.js for the shape.
+     */
+    const load = (doc) => {
+      const wasPlaying = playing;
+      stop();
+
+      roll.timebase = doc.timebase;
+      roll.grid = doc.grid;
+      roll.snap = doc.snap;
+      roll.tempo = doc.bpm;
+      roll.sequence = toSequence(doc.notes);
+      roll.markstart = 0;
+      roll.markend = barsFor(doc.notes, doc.timebase);
+      roll.xoffset = 0;
+      roll.xrange = VISIBLE_BARS * doc.timebase;
+
+      const view = pitchWindow(doc.notes);
+      roll.yoffset = view.yoffset;
+      roll.yrange = view.yrange;
+
+      roll.locate(0);
+      roll.redraw();
+
+      tempo.value = String(Math.round(doc.bpm));
+      tempoLabel.textContent = `${Math.round(doc.bpm)} bpm`;
+      provenance.textContent = doc.note;
+      describe();
+
+      if (wasPlaying) start();
+    };
+
+    // ---- MIDI import -----------------------------------------------------
+    /**
+     * Command. Reads the chosen file into the roll.
+     *
+     * A parse failure is shown in the UI AND rethrown: the message is what the
+     * person needs, the stack is what we need, and swallowing either would mean
+     * a file that silently does nothing.
+     */
+    const importMidi = async () => {
+      const file = midiInput.files?.[0];
+      if (!file) return;
+      provenance.textContent = `Reading ${file.name}…`;
+
+      const buffer = await file.arrayBuffer();
+      let doc;
+      try {
+        doc = midiToDoc(parseMidi(buffer), file.name);
+      } catch (err) {
+        provenance.textContent = `Could not import ${file.name}: ${err.message}`;
+        throw err;
+      }
+
+      // Imports are not presets; say so rather than leaving a stale name selected.
+      presetSelect.selectedIndex = -1;
+      load(doc);
+    };
+
+    // ---- wiring ----------------------------------------------------------
+    const onPlayClick = () => (playing ? stop() : start());
+
+    const onPresetChange = () => {
+      const preset = PRESETS.find((p) => p.name === presetSelect.value);
+      if (!preset) throw new Error(`No piano-roll preset named "${presetSelect.value}"`);
+      load(preset);
+    };
+
+    const onTempoInput = () => {
+      roll.tempo = Number(tempo.value);
+      tempoLabel.textContent = `${tempo.value} bpm`;
+      if (playing) { stop(); start(); }   // tick2time is fixed when play() starts
+    };
+
+    const onClear = () => {
+      stop();
+      roll.sequence = [];
+      roll.redraw();
+      describe();
+      provenance.textContent = 'Cleared. Drag on the roll to draw notes.';
+    };
+
+    const onMidiChange = () => { void importMidi(); };
+
+    playBtn.addEventListener('click', onPlayClick);
+    presetSelect.addEventListener('change', onPresetChange);
+    tempo.addEventListener('input', onTempoInput);
+    clearBtn.addEventListener('click', onClear);
+    midiInput.addEventListener('change', onMidiChange);
+
+    const starter = PRESETS.find((p) => p.name === STARTER_PRESET);
+    if (!starter) throw new Error(`Starter preset "${STARTER_PRESET}" is not in PRESETS`);
+    presetSelect.value = starter.name;
+    load(starter);
 
     return {
       /** Contributed while this mode is mounted. */
@@ -271,15 +607,16 @@ export const pianoRollMode = {
         chord: ' ',
         group: 'Piano roll',
         label: 'Play / stop the loop',
-        run: () => (playing ? stop() : start()),
+        run: onPlayClick,
       }],
 
       destroy() {
         stop();
-        grid.removeEventListener('pointerdown', onPointerDown);
-        grid.removeEventListener('pointermove', onPointerMove);
-        grid.removeEventListener('pointerup', onPointerUp);
-        grid.removeEventListener('pointercancel', onPointerUp);
+        playBtn.removeEventListener('click', onPlayClick);
+        presetSelect.removeEventListener('change', onPresetChange);
+        tempo.removeEventListener('input', onTempoInput);
+        clearBtn.removeEventListener('click', onClear);
+        midiInput.removeEventListener('change', onMidiChange);
         wrap.remove();
       },
     };

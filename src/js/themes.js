@@ -142,7 +142,18 @@ const GENERATED = [
   'piano', 'keyWhite', 'keyBlack',
 ];
 
-export const DEFAULT_THEME = 'glass';
+/**
+ * What a first-time visitor sees.
+ *
+ * Deliberately one of the restrained skins. The showy ones are more fun to look
+ * at in a list and worse to arrive on: a stranger's first job is to find the
+ * patch browser and press a key, not to admire a hatch pattern. Linear is dark,
+ * which matches Surge's own panel, and gets out of the way.
+ *
+ * Only affects people with nothing in localStorage -- an existing choice always
+ * wins, so changing this never overrides anybody.
+ */
+export const DEFAULT_THEME = 'linear';
 const STORAGE_KEY = 'websurge.skin';
 
 export const THEMES = {
