@@ -82,6 +82,13 @@
  *    mousemove/mouseup listeners, which it removes on mouseup. A mode torn down
  *    mid-drag would leak them; destroy() cannot reach them.
  *
+ * TWO WAYS IN BESIDES DRAWING
+ * ---------------------------
+ * `.mid` files go through midi-file.js, and piano-roll screenshots go through
+ * roll-screenshot.js. Both end at the same place: a roll document handed to
+ * `load()`, which is the single path into `roll.sequence`. Neither knows the
+ * component exists.
+ *
  * Licence: webaudio-pianoroll is Apache-2.0, which is one-way compatible with
  * this project's GPLv3.
  */
@@ -90,6 +97,7 @@
 
 import { PRESETS, barsFor } from './roll-presets.js';
 import { parseMidi } from './midi-file.js';
+import { decodeImage, readScreenshot, screenshotToDoc } from './roll-screenshot.js';
 
 /**
  * Where the vendored component is, resolved against THIS FILE's URL.
@@ -119,7 +127,12 @@ const VELOCITY = 100;
 
 const MS_PER_SECOND = 1000;
 
-/** 4/4 is assumed when converting a MIDI file's ticks-per-quarter into bars. */
+/**
+ * Quarter notes in the roll's bar. Not a musical assumption but a constraint:
+ * the component's tempo maths is `4*60/tempo/timebase`, so its bar is always
+ * four quarters. See roll-presets.js. A file in another metre keeps its rhythm
+ * and gets its real bars drawn as grid lines instead.
+ */
 const BEATS_PER_BAR = 4;
 
 /** How far ahead the component hands us events, in seconds. */
@@ -141,6 +154,7 @@ const PITCH_PADDING = 2;
 
 const MIDI_NOTE_MIN = 0;
 const MIDI_NOTE_MAX = 127;
+const SEMITONES_PER_OCTAVE = 12;
 
 /**
  * Opacities the roll is painted with, all applied to the skin's text colour so
@@ -390,6 +404,32 @@ export const pianoRollMode = {
     midiLabel.textContent = 'Import MIDI…';
     midiLabel.append(midiInput);
 
+    // Screenshot import. Same shape as the MIDI one, and deliberately labelled
+    // as a picture so nobody expects it to be as good as the .mid.
+    const shotInput = document.createElement('input');
+    shotInput.type = 'file';
+    shotInput.accept = 'image/*';
+    shotInput.className = 'hidden';
+
+    const shotLabel = document.createElement('label');
+    shotLabel.className = 'cursor-pointer rounded border border-current/30 px-3 py-1 '
+      + 'transition hover:opacity-80';
+    shotLabel.textContent = 'Read screenshot…';
+    shotLabel.title = 'Read notes out of a picture of another piano roll. Best effort: '
+      + 'the octave is a guess and anything scrolled out of frame is not in the image.';
+    shotLabel.append(shotInput);
+
+    // The octave is unknowable from a screenshot, so it has to be adjustable.
+    const octaveDown = document.createElement('button');
+    octaveDown.className = 'rounded border border-current/30 px-2 py-1 transition hover:opacity-80';
+    octaveDown.textContent = 'Oct −';
+    octaveDown.title = 'Transpose everything down an octave';
+
+    const octaveUp = document.createElement('button');
+    octaveUp.className = 'rounded border border-current/30 px-2 py-1 transition hover:opacity-80';
+    octaveUp.textContent = 'Oct +';
+    octaveUp.title = 'Transpose everything up an octave';
+
     const clearBtn = document.createElement('button');
     clearBtn.className = 'rounded border border-current/30 px-3 py-1 transition hover:opacity-80';
     clearBtn.textContent = 'Clear';
@@ -397,7 +437,8 @@ export const pianoRollMode = {
     const count = document.createElement('span');
     count.className = 'font-mono opacity-60';
 
-    bar.append(playBtn, tempo, tempoLabel, presetSelect, midiLabel, clearBtn, count);
+    bar.append(playBtn, tempo, tempoLabel, presetSelect, midiLabel, shotLabel,
+      octaveDown, octaveUp, clearBtn, count);
 
     // Where each preset says what it is and is not. See roll-presets.js.
     const provenance = document.createElement('p');
@@ -587,6 +628,60 @@ export const pianoRollMode = {
       load(doc);
     };
 
+    /**
+     * Command. Reads notes out of a screenshot of somebody else's piano roll.
+     *
+     * The image carries no tempo, so it keeps whatever the slider is on. Errors
+     * are shown AND rethrown, same as the MIDI path.
+     */
+    const importScreenshot = async () => {
+      const file = shotInput.files?.[0];
+      if (!file) return;
+      provenance.textContent = `Reading ${file.name}…`;
+
+      // decodeImage is inside the try on purpose: handing this a .mid by mistake
+      // is the obvious slip, and the browser's decoder throws a bare
+      // "The source image could not be decoded", which without this lands in the
+      // console and leaves the UI sitting on "Reading…" forever.
+      let doc;
+      try {
+        const image = await decodeImage(file);
+        doc = screenshotToDoc(readScreenshot(image), file.name, Number(tempo.value));
+      } catch (err) {
+        provenance.textContent = `Could not read ${file.name} as a piano-roll image: `
+          + `${err.message}`;
+        throw err;
+      }
+
+      presetSelect.selectedIndex = -1;
+      load(doc);
+    };
+
+    /**
+     * Command. Transposes everything on the roll by whole octaves.
+     *
+     * Exists because a screenshot cannot tell you its octave -- see
+     * roll-screenshot.js -- so the reading has to be nudgeable. Notes that would
+     * leave the MIDI range are left where they are rather than silently clamped
+     * into a wrong pitch.
+     */
+    const transposeOctaves = (octaves) => {
+      const shift = octaves * SEMITONES_PER_OCTAVE;
+      const blocked = roll.sequence.some((ev) =>
+        ev.n + shift < MIDI_NOTE_MIN || ev.n + shift > MIDI_NOTE_MAX);
+      if (blocked) {
+        io.setModeStatus('cannot transpose: some notes would fall off the keyboard');
+        return;
+      }
+      for (const ev of roll.sequence) ev.n += shift;
+
+      const view = pitchWindow(roll.sequence.map((ev) => ({ pitch: ev.n })));
+      roll.yoffset = view.yoffset;
+      roll.yrange = view.yrange;
+      roll.redraw();
+      io.setModeStatus(`transposed ${octaves > 0 ? 'up' : 'down'} an octave`);
+    };
+
     // ---- wiring ----------------------------------------------------------
     const onPlayClick = () => (playing ? stop() : start());
 
@@ -611,12 +706,18 @@ export const pianoRollMode = {
     };
 
     const onMidiChange = () => { void importMidi(); };
+    const onShotChange = () => { void importScreenshot(); };
+    const onOctaveDown = () => transposeOctaves(-1);
+    const onOctaveUp = () => transposeOctaves(1);
 
     playBtn.addEventListener('click', onPlayClick);
     presetSelect.addEventListener('change', onPresetChange);
     tempo.addEventListener('input', onTempoInput);
     clearBtn.addEventListener('click', onClear);
     midiInput.addEventListener('change', onMidiChange);
+    shotInput.addEventListener('change', onShotChange);
+    octaveDown.addEventListener('click', onOctaveDown);
+    octaveUp.addEventListener('click', onOctaveUp);
 
     const starter = PRESETS.find((p) => p.name === STARTER_PRESET);
     if (!starter) throw new Error(`Starter preset "${STARTER_PRESET}" is not in PRESETS`);
@@ -640,6 +741,9 @@ export const pianoRollMode = {
         tempo.removeEventListener('input', onTempoInput);
         clearBtn.removeEventListener('click', onClear);
         midiInput.removeEventListener('change', onMidiChange);
+        shotInput.removeEventListener('change', onShotChange);
+        octaveDown.removeEventListener('click', onOctaveDown);
+        octaveUp.removeEventListener('click', onOctaveUp);
         wrap.remove();
       },
     };

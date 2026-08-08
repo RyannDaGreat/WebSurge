@@ -16,6 +16,40 @@
  * cheaper than vendoring another library onto a page that already ships a 19 MB
  * wasm module.
  *
+ * WHY NOT A LIBRARY -- SETTLED, PLEASE DO NOT RE-LITIGATE
+ * ------------------------------------------------------
+ * This was reversed twice during development, so the reasoning is written down.
+ *
+ * Using a library WAS considered and briefly done: @tonejs/midi 2.0.28 (MIT,
+ * 32 KB self-contained UMD, wraps midi-file) was evaluated and vendored, and
+ * this file was deleted, before the decision was reversed. Also looked at:
+ * `midi-file` (MIT, no note pairing, CommonJS so it needs a build) and
+ * `midi-parser-js` (GPL despite being widely described as MIT, and also no note
+ * pairing).
+ *
+ * The project's rule really is "integrate existing open-source libraries rather
+ * than reimplement them", and the piano roll itself obeys it: webaudio-pianoroll
+ * is vendored precisely because a 46 KB interactive editor -- canvas rendering,
+ * drag/resize/select, scrolling, rulers -- is a large, mutable, taste-driven UI
+ * that would be absurd to rewrite. That is the case the rule is aimed at.
+ *
+ * A MIDI file reader is the opposite case on both axes that matter:
+ *   - SPEC STABILITY. SMF 1.0 has not changed since 1996. There is no upstream
+ *     to track, no browser quirks, no deprecations. A correct parser stays
+ *     correct forever, so the usual argument for a dependency -- somebody else
+ *     maintains it -- buys nothing.
+ *   - SIZE AND TESTABILITY. 409 lines of pure functions with no state, covered
+ *     by tests that build MIDI files byte by byte and check the exact traps a
+ *     naive parser gets wrong: running status, note-on-with-velocity-0 as a
+ *     release, stacked same-pitch overlaps, format-1 multi-track merging, and
+ *     loud failures on SMPTE division, bad magic and truncation.
+ *
+ * The real risk with a hand-written parser is a file that imports *slightly*
+ * wrong and is never noticed. That risk is answered by the byte-level tests, not
+ * by a dependency. If those tests ever start feeling inadequate, revisit -- and
+ * @tonejs/midi is the drop-in, since its notes already carry
+ * ticks/durationTicks/velocity.
+ *
  * WHAT IT DELIBERATELY DOES NOT DO
  * --------------------------------
  * - No SMPTE (negative division) files. Those measure time in film frames
