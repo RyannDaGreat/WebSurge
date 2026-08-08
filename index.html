@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<!--
+  Root entry point for GitHub Pages.
+
+  Pages is configured to publish this repository's ROOT from a branch, but the
+  site itself lives in src/ (the rest of the repo is build tooling and sources).
+  Branch-published Pages can only serve the root or /docs, so this forwards.
+
+  Kept as a real redirect rather than a copy of the page: duplicating index.html
+  would mean two files to keep in step, and they would silently diverge.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Surge XT — WebAssembly</title>
+<meta http-equiv="refresh" content="0; url=src/">
+<link rel="canonical" href="src/">
+<script>location.replace('src/' + location.search + location.hash);</script>
+<style>
+  body { background:#16181d; color:#9aa1ad; font:14px system-ui,sans-serif;
+         display:flex; align-items:center; justify-content:center; height:100vh; margin:0; }
+  a { color:#ff9000; }
+</style>
+</head>
+<body><p>Loading Surge XT… <a href="src/">continue</a></p></body>
+</html>
