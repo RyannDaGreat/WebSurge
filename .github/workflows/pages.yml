@@ -1,0 +1,71 @@
+# Deploy the Surge XT WASM site to GitHub Pages.
+#
+# The site is a plain static directory (src/), so there is nothing to build here
+# -- the WebAssembly is committed, because Pages cannot compile it. What this
+# workflow DOES do is regenerate the patch index from whatever is actually in
+# the repo, so the browser can never advertise a patch that would 404.
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Let a running deploy finish rather than cancelling it; a half-published site
+# is worse than a slightly stale one.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fail early if the engine was not committed
+        # Pages serves files verbatim and cannot build wasm. If these are absent
+        # the site would deploy and then die at runtime with a 404, which is far
+        # harder to diagnose than a red build.
+        run: |
+          missing=0
+          for f in src/index.html \
+                   src/js/surge-gui.js src/js/surge-gui.wasm \
+                   src/js/surge-engine.js src/js/surge-engine.wasm \
+                   src/js/surge-worklet-bundle.js; do
+            if [ ! -f "$f" ]; then echo "MISSING: $f"; missing=1; fi
+          done
+          [ "$missing" -eq 0 ] || {
+            echo "Run ./build.sh and ./build_gui.sh, then commit src/js/."
+            exit 1
+          }
+
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+
+      - name: Regenerate the patch index from committed data
+        # Deliberately regenerated rather than committed: the index must describe
+        # exactly what this deploy contains. A stale index lists patches that are
+        # not here, and the browser 404s on click.
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          uv run tools/gen_patch_index.py
+
+      - uses: actions/configure-pages@v5
+
+      - name: Upload src/ as the site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: src
+
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -6,14 +6,22 @@
 .claude_vlm_checks/
 .frenzy/
 
-# Bulk Surge resource data copied out of the upstream clone by tools/stage_data.sh.
-# ~480 MB of patches/wavetables/impulses; reproducible from the pinned Surge SHA,
-# so it is deliberately NOT in git. Run tools/stage_data.sh to repopulate.
-/src/data/
+# Surge resource data, staged by tools/stage_data.sh.
+#
+# The FACTORY banks are committed so the GitHub Pages deploy is self-contained:
+# 639 patches (24 MB) plus factory wavetables (6.3 MB). Everything else is
+# reproducible from the pinned Surge SHA and would push the repo past what is
+# reasonable, so it stays out. Run tools/stage_data.sh to get the full set
+# locally; the site simply lists fewer patches without it.
+/src/data/*
+!/src/data/patches_factory/
+!/src/data/wavetables/
 
-# Emscripten build products (regenerable)
-/src/js/surge-engine.js
-/src/js/surge-engine.wasm
+# Emscripten build products.
+#
+# These ARE committed, unlike most build output: GitHub Pages serves this
+# directory verbatim and cannot build wasm itself, so the deploy needs them.
+# Regenerate with ./build.sh and ./build_gui.sh.
 /src/js/*.wasm.map
 
 # Dev-only browser-test tooling (puppeteer). Reinstalled by run_server.sh /
