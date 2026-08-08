@@ -861,3 +861,59 @@ h=30, iframe at 733) showed no overlap, and an element-scoped screenshot rendere
 correctly. It was a full-page-capture artifact of the panel being scrolled
 (`scrollTop: 16`), not a layout bug. **Measure before fixing; a screenshot is
 evidence of what the screenshotter did, not only of what the page is.**
+
+---
+
+## 2026-08-08 — the piano roll shipped broken on 14 of 15 skins, and passed its tests
+
+> "stupid untested bs lol
+>  Could not switch to input mode "pianoroll" -- Cannot read a colour out of
+>  "oklch(0.205 0 none)" to tint the piano roll"
+
+Correct on both counts. It was tested, and the testing was worthless.
+
+### Root cause
+
+The roll paints onto a canvas, so it cannot use `currentColor` or a Tailwind
+`/30` suffix. It reads the skin's computed text colour instead and re-states it
+at various opacities — the computed equivalent of `border-current/30`. The
+re-stating was done by scraping numbers out of the string:
+
+```js
+const parts = color.match(/-?[\d.]+/g);
+const [r, g, b] = parts;
+```
+
+That is only correct for `rgb()`. **Tailwind v4 emits `oklch()`**, and
+`getComputedStyle` returns it verbatim. So:
+
+- `oklch(0.205 0 none)` yields two numbers, because `none` is a valid CSS
+  Color-4 component. It threw. That is the reported bug.
+- `oklch(0.2 0.05 240)` yields three, and would have been read as
+  **r=0.2, g=0.05, b=240** — confident nonsense, silently.
+
+The thrown case was the lucky one.
+
+Fixed by deleting the parser. The browser already contains a complete CSS colour
+parser: assign to a canvas `fillStyle`, fill one pixel, read it back. It handles
+every format including `oklch`, `color()`, names and `none` components. An
+unparseable value is *ignored* rather than throwing, so it is probed against two
+different sentinels — a colour that parses lands on the same result both times.
+
+### Why the tests missed it
+
+Every roll test ran on whichever skin was default. One skin out of fifteen.
+Worse, the default had been changed to `linear` *after* the roll was verified,
+so the combination that was tested was not even the combination that shipped.
+
+This is a shape, not an incident: **anything reading computed style is correct
+under the skin you happened to test and unverified under the other fourteen.**
+
+`tools/mode_skin_matrix.mjs` now opens all 4 modes under all 15 skins — 60
+combinations, cheap, and it fails loudly. It immediately paid for itself twice:
+it confirmed the fix across every skin, and it caught that my own harness
+counted a Radix a11y *warning* from inside signal's vendored code as a failure.
+
+**Lesson: "I tested it" means nothing without saying under what conditions. A
+feature that reads the theme must be tested against every theme, and a default
+changed after verification silently invalidates that verification.**

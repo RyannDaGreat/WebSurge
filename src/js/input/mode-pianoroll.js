@@ -170,27 +170,74 @@ const ALPHA_RULER_BG = 0.1;
 const ALPHA_RULER_BORDER = 0.3;
 const ALPHA_SELECT_AREA = 0.2;
 
+/** A 1x1 canvas used only to make the browser parse colours. Created once. */
+let colorProbe = null;
+
 /**
- * Pure function. Restates a CSS colour at a different opacity.
+ * Query. Turns any CSS colour the browser understands into `[r, g, b]`.
+ *
+ * Reads a canvas rather than the string, because scraping numbers out of a
+ * colour is wrong the moment the colour is not `rgb()`. Tailwind v4 emits
+ * `oklch()`, and `getComputedStyle` hands it straight back -- so a regex either
+ * fails (`oklch(0.205 0 none)` has only two numbers, `none` being a valid
+ * Colour-4 component) or, far worse, succeeds and reads lightness and chroma AS
+ * red and green. That second case is silent and produces confident nonsense.
+ *
+ * The browser already contains a complete CSS colour parser. Use it.
+ *
+ * @param {string} color - any CSS colour: rgb, hsl, oklch, color(), a name
+ * @returns {[number, number, number]} 0..255 each, clamped into sRGB
+ *
+ * @example toRgb('rgb(226, 232, 240)')   // [226, 232, 240]
+ * @example toRgb('oklch(0.205 0 none)')  // [39, 39, 39]  (an achromatic grey)
+ */
+function toRgb(color) {
+  if (colorProbe === null) {
+    colorProbe = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
+  }
+
+  // An unparseable fillStyle is IGNORED rather than throwing, so the old value
+  // survives and the failure is invisible. Assign it after two DIFFERENT
+  // sentinels: a colour that parses lands on the same result both times, and
+  // one that does not leaves the two sentinels behind.
+  colorProbe.fillStyle = '#000000';
+  colorProbe.fillStyle = color;
+  const first = colorProbe.fillStyle;
+
+  colorProbe.fillStyle = '#ffffff';
+  colorProbe.fillStyle = color;
+  if (colorProbe.fillStyle !== first) {
+    throw new Error(`"${color}" is not a colour this browser can parse`);
+  }
+
+  colorProbe.clearRect(0, 0, 1, 1);
+  colorProbe.fillRect(0, 0, 1, 1);
+  const [r, g, b] = colorProbe.getImageData(0, 0, 1, 1).data;
+  return [r, g, b];
+}
+
+/**
+ * Query. Restates a CSS colour at a different opacity.
  *
  * The roll paints onto a canvas, so it needs literal colour strings and cannot
  * take `currentColor` or a Tailwind `/30` suffix. Everything it draws is
- * therefore the skin's own text colour at some opacity, which is what
+ * therefore the skin's own text colour at some opacity -- what
  * `border-current/30` means elsewhere in the app, computed rather than declared.
  *
- * @param {string} color - any `rgb()`/`rgba()` string, as getComputedStyle returns
+ * `rgb()` input is handled without touching the DOM so this stays usable in the
+ * node test suite; anything else goes through the browser's parser.
+ *
+ * @param {string} color - any CSS colour, as getComputedStyle returns it
  * @param {number} alpha - 0..1
  * @returns {string} an `rgba()` string
  *
  * @example rgbaFrom('rgb(226, 232, 240)', 0.25)     // 'rgba(226, 232, 240, 0.25)'
  * @example rgbaFrom('rgba(15, 23, 42, 0.9)', 0.06)  // 'rgba(15, 23, 42, 0.06)'
+ * @example rgbaFrom('oklch(0.205 0 none)', 0.3)     // 'rgba(39, 39, 39, 0.3)'
  */
 export function rgbaFrom(color, alpha) {
-  const parts = color.match(/-?[\d.]+/g);
-  if (!parts || parts.length < 3) {
-    throw new Error(`Cannot read a colour out of "${color}" to tint the piano roll`);
-  }
-  const [r, g, b] = parts;
+  const plain = /^rgba?\(\s*(\d+)[\s,]+(\d+)[\s,]+(\d+)/.exec(color);
+  const [r, g, b] = plain ? plain.slice(1) : toRgb(color);
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
