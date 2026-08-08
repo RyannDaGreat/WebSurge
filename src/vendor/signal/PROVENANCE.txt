@@ -1,0 +1,4 @@
+ryohey/signal, built from https://github.com/ryohey/signal at
+632de9685990c90d0be127994908cc43692ff82a, patched by patches/signal-embed.patch.
+MIT licensed -- see LICENSE beside this file.
+Regenerate with ./setup.sh signal. Do not edit anything here by hand.

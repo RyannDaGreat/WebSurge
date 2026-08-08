@@ -736,3 +736,128 @@ The piano roll is being rebuilt around the actual component.
 **Lesson: a requirement that lives only in the conversation will be lost, and
 the thing that replaces it will be something I invented. Write it down when it
 is said, verbatim, before writing any code. "I'll remember" is the failure.**
+
+---
+
+## 2026-08-08 — Integrating ryohey/signal as the fourth input mode
+
+### What was asked
+
+The second piano roll: <https://github.com/ryohey/signal>, alongside the
+existing `webaudio-pianoroll` one rather than replacing it (*"WE'll have two
+piano roll editors."*). The standard was stated three times: *"the piano roll
+open source thing should NOT be vibecoded"*, *"Hopefully your agent is LITERALLY
+USING the midi code I gave? Not just trying to reimplement it"*, *"Again, USE IT
+dont imitate it"*.
+
+Recorded in the manifest §1 table as row 19a **before** any code was written,
+which is the whole point of the previous entry in this file.
+
+### What signal turned out to be
+
+An application, not a library. Verified rather than assumed: no npm package, no
+web component, no embed API, and `packages/` contains only private workspace
+packages (`@signal-app/player`, `@signal-app/core`) holding the engine and data
+model — nothing mountable. So the route was: build it, frame it, bridge it. The
+alternative "check `packages/` for something reusable" was ruled out by looking.
+
+Web MIDI was ruled out on the same grounds the task suspected: a web page cannot
+create a virtual MIDI destination, so it would need a real loopback device on the
+listener's machine. Not shippable.
+
+### The bug that took the longest, and why it was deceptive
+
+`packages/player` defines a two-method `SynthOutput` interface and
+`app/src/services/GroupOutput.ts` fans events out to a list of them. Obvious
+seam. The obvious *place* to plug into it — the `synthGroup.outputs.push(...)` in
+`RootStore`'s constructor — is wrong, and wrong in the worst possible way:
+
+`updateOutputDevices` in `stores/reactions.ts` **reassigns
+`synthGroup.outputs` outright**, and `registerReactions(this)` — the last
+statement of that very constructor — wraps it in a mobx `autorun`, which runs
+immediately. So the pushed entry survives for microseconds. Upstream's own push
+is equally dead, which is why nothing about the code looks suspicious.
+
+What made it hard to see: `updateOutputDevices` calls `player.allSoundsOff()`
+**before** the reassignment. So exactly 16 controller events *do* reach the
+pushed output, and then nothing ever does again. Every symptom pointed at the
+transport:
+
+- a bridge that delivers 16 messages then goes quiet reads as a broken channel;
+- `postMessage` never threw, so there was no error anywhere;
+- the transport ran correctly (timestamp advancing 0001:01 → 0005:01);
+- the notes were visibly in the roll;
+- and a hand-written `postMessage` test from the frame arrived fine.
+
+Four wrong hypotheses were entertained and each was killed by measurement rather
+than reasoning: `DataCloneError` on mobx Proxy objects (no — the events that
+cross are plain literals and nothing threw), a `targetOrigin` mismatch (no —
+both frames reported `http://127.0.0.1:8899`), a stale `this.parent` (no —
+`===window.parent`, `===window.top`, `parentHref` was our index.html), and
+track-mute filtering (no — `TrackMute.empty` plays everything).
+
+**What actually found it:** instrumenting the *minified staged bundle* in place,
+first `ParentPortOutput.sendEvent`, then `GroupOutput.sendEvent`, printing
+`trackId` and `outs`/`total`. That showed `outs=1 total=1` forwarding 53 events
+while the output's own counter recorded 16 — which can only mean the entry in the
+list is not the object that was pushed. From there `reactions.ts` was two greps
+away.
+
+**Two lessons:**
+
+1. **Console logging is lossy at volume.** Two of the runs were misread because
+   Chrome dropped console messages, and the totals looked self-consistent. The
+   run that settled it accumulated counters into a frame global and read them
+   once at the end. Count in the page, not in the transcript.
+2. **`.push()` into a field owned by a mobx reaction is a coin toss.** Look for
+   who *assigns* the collection, not who reads it. In this codebase the honest
+   seam turned out to be the reaction itself, which is also strictly better: it
+   re-runs when MIDI devices change, so our output survives those changes.
+
+### The other trap: a test that passes for the wrong reason
+
+An early run reported notes reaching the worklet and it was nearly believed. They
+were not signal's. Our own 128-key piano is **sticky at the bottom of the
+viewport and sits over the frame's transport bar**, so clicking signal's play
+button at its page coordinates hit our piano and played a note — indistinguishable
+from success in the counter. One of those false positives even had a plausible
+pitch (`key: 64, velocity: 100`, which is exactly signal's
+`previewNoteOn(64, 500)` instrument-browser audition, reached by a stray click).
+
+The keeper test now dispatches play **inside** the frame and counts *both* sides
+of the boundary separately — raw `postMessage` arrivals and worklet arrivals — so
+a pass can be attributed and a false positive cannot masquerade.
+
+**Lesson: an end-to-end counter that only counts the destination cannot tell you
+where the input came from. Instrument the seam, not just the outcome.**
+
+### Verification that was actually done
+
+`.frenzy/signal_mode_test.mjs`, against `src/` on port 8899:
+
+- five notes drawn with real mouse drags on signal's WebGL roll → 10 messages
+  crossed → 10 reached the worklet, pitches `[60,61,63,64,66]` (the five drawn);
+- 8 s of transport playback → 27 messages crossed
+  (`controller/noteOff/noteOn/pitchBend/programChange`), the note ones delivered
+  and the automation ones correctly ignored;
+- a synthetic `velocity: 42, delayMs: 700` event → not fired at +200 ms, arrived
+  by +1100 ms with velocity 42 intact (real drags all carry signal's default 100,
+  so they cannot prove velocity is forwarded rather than hardcoded);
+- switching away → 0 stray notes, iframe removed, and re-mounting works;
+- **zero offsite hosts contacted** — Firebase, Sentry, Google Analytics, Google
+  Fonts and the two jsDelivr SoundFont downloads are all gone;
+- no "Sign In" and no sign-up menu item in the frame;
+- `.frenzy/input_test.mjs` re-run: keyboard, pianoroll (9 notes) and notation
+  (25 notes) all unaffected;
+- `.frenzy/signal_unit_test.mjs`: 11 assertions on `noteCommandFor`.
+
+The only console error is the pre-existing, documented `/tailwindcss` 404.
+
+### A misread worth recording
+
+A full-page screenshot appeared to show the mode's two caption paragraphs
+overlapping. Measuring the DOM (`status` at y=671 h=16, `provenance` at y=695
+h=30, iframe at 733) showed no overlap, and an element-scoped screenshot rendered
+correctly. It was a full-page-capture artifact of the panel being scrolled
+(`scrollTop: 16`), not a layout bug. **Measure before fixing; a screenshot is
+evidence of what the screenshotter did, not only of what the page is.**

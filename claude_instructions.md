@@ -55,6 +55,7 @@ goes in this list before any code is written.**
 | 17 | *"Modularize it tho"* | §14 — the mode registry |
 | 18 | **The piano roll:** <https://github.com/g200kg/webaudio-pianoroll>. Asked for as *"open source piano roll editors we can make this wokr with in the web"*. **Integrate this component; do not reimplement it.** | §14 |
 | 19 | *"would be nice if there was a pitch bend / mod wheel / midi knobs that interact with the presets"* | §15 |
+| 19a | **The second piano roll:** <https://github.com/ryohey/signal>, plus *"WE'll have two piano roll editors."* Stated three times: *"the piano roll open source thing should NOT be vibecoded"*, *"Hopefully your agent is LITERALLY USING the midi code I gave? Not just trying to reimplement it"*, *"Again, USE IT dont imitate it"*. **Build and run their application; do not write a lookalike.** | §14.1 |
 | 20 | *"we gonna be piping midi into it later"* | Backburner — Web MIDI |
 | 21 | The "Claire Song" (FL Studio screenshot, `.frenzy/ref/claire.png`) as a roll preset. **Cannot be transcribed from the image** — 400+ notes, most labels truncated. Needs the MIDI/FLP. Do not fabricate it. | §14 |
 
@@ -163,7 +164,8 @@ and `concerns.md`).
 ### Running it
 
 ```sh
-./setup.sh                        # emsdk 6.0.0 + Surge at the pinned SHA + vendor patches
+./setup.sh                        # emsdk 6.0.0 + Surge + signal, all at pinned SHAs, all patched
+./setup.sh signal                 # just signal: clone, patch, npm ci, build -> src/vendor/signal/
 ./build.sh                        # engine  -> src/js/surge-engine.{js,wasm} + worklet bundle
 ./build_gui.sh                    # the GUI -> src/js/surge-gui.{js,wasm}   (incremental)
 ./tools/stage_data.sh             # ~469 MB of patches/wavetables into src/data/
@@ -174,6 +176,19 @@ node .frenzy/build_themes.mjs     # src/js/themes.js from the skin definitions
 
 `build_gui.sh` is incremental — it skips any object newer than its source, so a
 one-file change is one translation unit plus the link, not 75.
+
+**Never edit a clone under `vendor/` directly.** Every change to third-party
+source lives in `patches/*.patch`, which `setup.sh` applies idempotently
+(`--reverse --check` first, so re-running is a no-op). Each patch declares its
+destination on its first lines:
+
+```
+# repo: surge | signal      which checkout; optional, defaults to surge
+# target: <path>            relative to that checkout, "." for its root
+```
+
+followed by a prose header explaining *why* and then the diff. A loose edit in a
+clone is a build nobody else can reproduce.
 
 Verification (never skip these — a compile is not evidence of sound):
 
@@ -202,9 +217,11 @@ so a skin can be perfect in the file and render as nothing.
 | `src/skin/` | The 142 classic-skin SVGs. |
 | `src/js/input/` | The note-input modes, shortcut table and legend. See §13. |
 | `src/js/themes.js` | **Generated.** The ten skins. See §12. |
-| `src/vendor/` | Pinned third-party browser libraries: Tailwind 4.3.3 (275 KB), abcjs 6.4.4 (472 KB). Vendored, not hot-linked, so the dump works offline. |
+| `src/vendor/` | Pinned third-party browser libraries: Tailwind 4.3.3 (275 KB), abcjs 6.4.4 (472 KB), webaudio-pianoroll 0.6.0 (46 KB). Vendored, not hot-linked, so the dump works offline. |
+| `src/vendor/signal/` | ryohey's signal, **built by us** and committed, 2.9 MB. Regenerate with `./setup.sh signal`. Carries its own `LICENSE` (MIT) and `PROVENANCE.txt`. See §14. |
 | `src/js/surge-{engine,gui}.{js,wasm}` | Our Emscripten build output. **Committed** — Pages serves them directly. |
 | `vendor/surge/` | Upstream Surge clone at the pinned SHA. **gitignored** — `setup.sh` clones it. |
+| `vendor/signal/` | Upstream signal clone at the pinned SHA, plus its 550 MB `node_modules`. **gitignored** — `setup.sh signal` clones, patches and builds it. |
 | `emsdk/` | Emscripten 6.0.0. **gitignored** — `setup.sh` installs it. |
 | `tools/` | Build-time generators (layout extraction, patch indexing, data staging). |
 | `build/` | CMake build tree. gitignored. |
@@ -420,7 +437,18 @@ so a project Pages site cannot satisfy it. Noise, not breakage.
 
 ## 14. Input modes
 
-`src/js/input/`. One mounted at a time, chosen from the toolbar or `Ctrl+1/2/3`.
+`src/js/input/`. One mounted at a time, chosen from the toolbar or `Ctrl+1/2/3/4`.
+
+| id | What it is | Whose code |
+| --- | --- | --- |
+| `keyboard` | QWERTY note layout | ours |
+| `pianoroll` | webaudio-pianoroll, Apache-2.0, g200kg | theirs, in `src/vendor/` |
+| `notation` | abcjs, MIT | theirs, in `src/vendor/` |
+| `signal` | ryohey's full MIDI sequencer, MIT | theirs, **built by us**, in `src/vendor/signal/` |
+
+**There are deliberately two piano rolls.** The user asked for both: *"WE'll have
+two piano roll editors."* `pianoroll` is the small embeddable component;
+`signal` is a whole application. Neither replaces the other.
 
 A mode is `{id, label, hint, async mount(container, io) -> {destroy, shortcuts?}}`.
 `io` — `{noteOn, noteOff, allNotesOff, setModeStatus}` — is the **only** channel
@@ -436,7 +464,97 @@ would mean two input sources firing after a switch, notes stuck on, no error.
 than at page load; the notation mode pulls in 472 KB of abcjs that way.
 
 Both the roll and the notation editor are **not sequencers** and must not be
-described as such — see the Backburner entry above.
+described as such — see the Backburner entry above. Nor is `signal`, from Surge's
+point of view: signal *is* a sequencer, but the last hop into the worklet is
+still `setTimeout` + `postMessage`, so its timing is as approximate as the
+others'. The fix is the same one, once, inside `surge-worklet.js`.
+
+### 14.1 The `signal` mode
+
+**What it is.** <https://github.com/ryohey/signal>, pinned at
+`632de9685990c90d0be127994908cc43692ff82a`, MIT. A React + TypeScript Turborepo
+monorepo with a WebGL piano roll, an arrange view, a tempo graph and automation
+lanes. **It is an application, not a library** — no npm package, no web
+component, no embed API. `packages/` was checked: `@signal-app/player` and
+`@signal-app/core` are private workspace packages holding the engine and the data
+model, not a mountable editor.
+
+**Why an iframe.** Being an application, the only way to *use* it rather than
+imitate it is to build it and frame it. `src/js/input/mode-signal.js` creates one
+`<iframe>` pointing at `src/vendor/signal/edit.html`, same-origin, and does
+nothing else but translate messages. That file plus one line in
+`patches/signal-embed.patch` is the entire integration.
+
+**The seam, and the trap.** signal fans every MIDI event through a two-method
+`SynthOutput` interface, and `app/src/services/GroupOutput.ts` holds a list of
+them — the same mechanism it already uses to play to a real MIDI port instead of
+its own SoundFont. So the patch adds one more implementation, `ParentPortOutput`,
+which posts each event to `window.parent`.
+
+The trap, which cost most of the integration time: **the obvious place to select
+it — the `synthGroup.outputs.push(...)` in `RootStore`'s constructor — does not
+work.** `updateOutputDevices` in `stores/reactions.ts` *replaces*
+`synthGroup.outputs` outright, and `registerReactions` (the last line of that same
+constructor) wraps it in an `autorun`, which runs immediately. Anything pushed in
+the constructor is discarded microseconds later. Worse, `updateOutputDevices`
+calls `player.allSoundsOff()` *before* the reassignment, so exactly 16 controller
+events do arrive and nothing ever does again — which reads as a broken transport
+rather than a bypassed one. **The selection belongs in `updateOutputDevices`,
+which owns the list**, and that is also the better seam: it re-runs when MIDI
+devices change, so our output survives those changes.
+
+**What crosses, and what cannot.** Only note-on and note-off, because
+`io` is `{noteOn, noteOff, allNotesOff, setModeStatus}` and that is all a mode
+gets. Verified: velocity survives; the two "all notes/sounds off" controllers are
+honoured; a note-on with velocity 0 is treated as a release (real MIDI, and
+signal's exporter emits them). **Dropped:** pitch bend, CC lanes, aftertouch and
+program changes — the biggest gap, since signal has full automation lanes for
+them and `surge-worklet.js` already understands `pitchBend` and `cc` (see §15).
+Widening `io` is the fix. Also, all 16 channels collapse onto the one Surge
+patch, so drums on channel 10 play as pitches. signal's metronome never arrives:
+it is routed to a separate output and is off by default.
+
+**Timing.** Each message carries `delayMs`, relative to the moment it was posted,
+*not* a timestamp — `performance.now()` is measured from each browsing context's
+own time origin, so a timestamp from the iframe is a reading from a clock the
+parent does not share.
+
+**What the patch turns off, and why.** No Firebase, no sign-in, no cloud
+open/save (a static site cannot have an account; a login prompt would be broken
+and inappropriate). No Google Analytics, no Sentry, no Google Fonts — an embedded
+build makes **no third-party requests**, verified: zero offsite hosts contacted.
+The cost is cosmetic: signal renders in system fonts rather than Inter. The
+service-worker registration is removed too; it asked for an absolute
+`/service-worker.js` at scope `/edit`, unsatisfiable from a subdirectory. Local
+File > Open/Save and MIDI import/export still work.
+
+**Size.** 17 MB → **2.9 MB** committed, by minifying, dropping the ~11 MB of
+source maps, and building only the editor entry (`auth.html` and `community.html`
+are cloud front-ends; dropping them takes firebaseui out of the bundle). One
+2.35 MB JS chunk, a 386 KB SoundFont worklet that is never loaded when embedded
+but is still emitted because a `new URL(...)` reference keeps it, a 140 KB font
+atlas, and ~101 KB of PWA icons plus `manifest.webmanifest` that nothing
+references any more (the `<link rel="manifest">` is gone). Left in place rather
+than filtered out in the staging step, because a hand-maintained exclude list
+rots and 101 KB does not matter.
+
+**Licence.** MIT, one-way compatible with our GPLv3: we may ship signal under the
+GPL; they could not ship us under the MIT. The notice travels with the build at
+`src/vendor/signal/LICENSE`, and `PROVENANCE.txt` records the commit. Anything we
+ship remains GPLv3 as a whole and must carry source.
+
+**Known rough edges**, none of them silent:
+- Our sticky 128-key piano overlays the bottom of the frame, so signal's
+  transport bar needs a scroll to reach. This also means a *test* that clicks the
+  play button at its page coordinates hits our piano and plays a note, which
+  looks exactly like success — `.frenzy/signal_mode_test.mjs` dispatches inside
+  the frame instead.
+- Keyboard shortcuts belong to whichever frame has focus, so `Ctrl+1…4` will not
+  switch modes while the editor is focused.
+- The iframe constructs its own `AudioContext` (unused, suspended) because
+  `RootStore` builds one unconditionally.
+- Unmounting the mode discards the song; signal's own localStorage autosave
+  brings it back on the next mount.
 
 ## 15. Macros and MIDI controllers (not yet wired)
 

@@ -25,6 +25,7 @@ import { createModeRegistry } from './input/registry.js';
 import { keyboardMode } from './input/mode-keyboard.js';
 import { pianoRollMode } from './input/mode-pianoroll.js';
 import { notationMode } from './input/mode-notation.js';
+import { signalMode } from './input/mode-signal.js';
 import { attachShortcuts } from './input/shortcuts.js';
 import { BINDINGS } from './input/bindings.js';
 import { createShortcutKey } from './input/shortcut-key.js';
@@ -42,7 +43,7 @@ const ENGINE_WASM = 'js/surge-engine.wasm';
 const DATA_PATH = SURGE_DATA_ROOT;
 
 /** The input modes, in picker order. Also the registry's contents. */
-const INPUT_MODES = [keyboardMode, pianoRollMode, notationMode];
+const INPUT_MODES = [keyboardMode, pianoRollMode, notationMode, signalMode];
 
 const $ = (id) => document.getElementById(id);
 const setStatus = (m) => { $('status').textContent = m; };

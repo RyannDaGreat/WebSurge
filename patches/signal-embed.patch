@@ -1,0 +1,606 @@
+# repo: signal
+# target: .
+#
+# Make ryohey/signal embeddable: route its MIDI to the embedding page, and turn
+# off everything that assumes it is signalmidi.app.
+#
+# WHY THIS PATCH EXISTS
+# ---------------------
+# signal is an application, not a library. There is no npm package, no web
+# component and no documented embed API, so the only way to *use* it rather than
+# imitate it is to build the app and put the built app in an iframe. That works
+# without any patch at all -- but the iframe would then be a self-contained
+# sequencer playing its own SoundFont, which is not the point. The point is that
+# signal edits the notes and Surge makes the sound.
+#
+# THE SEAM
+# --------
+# packages/player defines a two-method `SynthOutput` interface, and
+# app/src/services/GroupOutput.ts fans every event out to a list of them. That
+# list is how signal already supports sending to a real MIDI port instead of its
+# own synth (see app/src/services/MIDIOutput.ts). Everything audible goes through
+# it: playback, note previews while drawing, the piano gutter, instrument
+# auditions. So this patch adds one more implementation of that interface --
+# ParentPortOutput, which posts each event to window.parent -- and selects it.
+#
+# WHERE THE OUTPUT LIST IS ACTUALLY OWNED (learned the hard way)
+# -------------------------------------------------------------
+# The obvious place to select it is the `synthGroup.outputs.push(...)` in
+# RootStore's constructor. That does not work, and fails in a way that looks like
+# the bridge is broken rather than bypassed: `updateOutputDevices` in
+# stores/reactions.ts REPLACES `synthGroup.outputs` outright, and
+# `registerReactions` -- the last statement of the same constructor -- wraps it
+# in an `autorun`, which runs immediately. So anything pushed in the constructor
+# is discarded microseconds later, and from then on every note goes to the
+# SoundFont synth.
+#
+# What made this confusing to diagnose is that `updateOutputDevices` calls
+# `player.allSoundsOff()` BEFORE the reassignment: exactly 16 controller events
+# do reach an output pushed by the constructor, and nothing ever does again. A
+# bridge that delivers 16 messages and then goes quiet looks like a transport
+# fault, and is not.
+#
+# So the selection lives in `updateOutputDevices`, which is the function that
+# owns the list. It is also the better seam: it re-runs when MIDI devices change,
+# so the embedder's output survives those changes instead of being dropped.
+#
+# No editor code is touched. The piano roll, the note model, the WebGL renderer,
+# the gestures, the arrange view and the tempo editor are all upstream's.
+#
+# WHAT "EMBEDDED" MEANS
+# --------------------
+# `isEmbedded()` in app/src/helpers/platform.ts, alongside upstream's
+# `isRunningInElectron()`: true when this document is in a frame. Loaded as a top
+# -level page the build behaves exactly as upstream does, SoundFont and all, so
+# there is no silent no-sound mode to fall into. Embedded, it additionally:
+#
+#   - skips SoundFontSynth setup, which is also the only reason the app ever
+#     touched a CDN (A320U.sf2 is ~30 MB)
+#   - never initialises Firebase, and hides the sign-in button and the sign-up
+#     menu item, so no cloud path is reachable
+#
+# UNCONDITIONAL CHANGES (they apply to this build however it is opened)
+# --------------------------------------------------------------------
+#   - Google Analytics and the Google Fonts stylesheets are removed from
+#     edit.html: an embedder must not make third-party requests on someone
+#     else's page. Cost: the UI falls back to system fonts.
+#   - Sentry is removed from index.tsx, for the same reason.
+#   - The service-worker registration is removed, and the generation step with
+#     it: it asked for absolute "/service-worker.js" at scope "/edit", which
+#     cannot work from a subdirectory.
+#   - The build emits relative URLs (base: "./"), minified, without the ~11 MB of
+#     source maps, and only the editor entry -- auth.html and community.html are
+#     cloud front-ends, and dropping them takes firebaseui out of the bundle.
+#     17 MB -> 2.9 MB.
+#   - The three dead copies in app/public/ go with them.
+#
+# NOT upstreamable as-is: removing analytics and Sentry is a fork's decision, not
+# a fix. ParentPortOutput and `isEmbedded()` would be.
+diff --git a/app/edit.html b/app/edit.html
+index d70ff421..1d9eea22 100644
+--- a/app/edit.html
++++ b/app/edit.html
+@@ -7,39 +7,21 @@
+     content="initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no"
+     name="viewport"
+   />
+-  <!-- Global site tag (gtag.js) - Google Analytics -->
+-  <script
+-    async
+-    src="https://www.googletagmanager.com/gtag/js?id=UA-179088031-1"
+-  ></script>
+-  <script>
+-    window.dataLayer = window.dataLayer || []
+-    function gtag() {
+-      dataLayer.push(arguments)
+-    }
+-    gtag("js", new Date())
++  <!--
++    WebSurge: Google Analytics, the Google Fonts stylesheets and the PWA
++    manifest/apple-touch-icon were here, and are removed.
+ 
+-    gtag("config", "UA-179088031-1")
+-  </script>
++    An embedded build makes no third-party requests: analytics on someone
++    else's page is not ours to collect, and the two font stylesheets pulled
++    Inter and Roboto Mono from fonts.googleapis.com on every load, which a
++    self-hosted static site should not need a CDN for. The cost is real and
++    cosmetic -- the UI falls back to the system sans-serif and monospace.
+ 
+-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+-  <link
+-    href="https://fonts.googleapis.com/css2?family=Inter:wght@300;600;800&display=swap"
+-    rel="stylesheet"
+-  />
+-  <link
+-    href="https://fonts.googleapis.com/css2?family=Roboto+Mono&display=swap"
+-    rel="stylesheet"
+-  />
+-  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+-
+-  <!-- PWA -->
+-  <link rel="manifest" href="/manifest.webmanifest" />
+-  
+-  <meta name="apple-mobile-web-app-capable" content="yes" />
+-  <meta name="mobile-web-app-capable" content="yes" />
++    The manifest and icons were absolute ("/manifest.webmanifest"), so under an
++    embedder's subdirectory they 404 anyway, and an iframe is not installable.
++  -->
++  <link rel="icon" type="image/svg+xml" href="favicon.svg" />
+   <meta name="theme-color" content="#272a36" />
+-  <link rel="apple-touch-icon" sizes="192x192" href="/icon-192x192.png" />
+ </head>
+ <body>
+   <div id="root"></div>
+diff --git a/app/package.json b/app/package.json
+index 402ae0df..1dfd7d30 100644
+--- a/app/package.json
++++ b/app/package.json
+@@ -4,7 +4,7 @@
+   "description": "A friendly music sequencer application for OS X and Windows.",
+   "scripts": {
+     "dev": "vite",
+-    "build": "vite build && node generate-service-worker.mjs",
++    "build": "vite build",
+     "build:electron": "vite build --config vite-electron.config.mts",
+     "serve": "npx http-server dist",
+     "test": "vitest run",
+diff --git a/app/public/auth.html b/app/public/auth.html
+deleted file mode 100644
+index dd8b2be2..00000000
+--- a/app/public/auth.html
++++ /dev/null
+@@ -1,37 +0,0 @@
+-<!DOCTYPE html>
+-<meta charset="UTF-8" />
+-<title>signal</title>
+-<head>
+-  <meta
+-    content="initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no"
+-    name="viewport"
+-  />
+-  <!-- Global site tag (gtag.js) - Google Analytics -->
+-  <script
+-    async
+-    src="https://www.googletagmanager.com/gtag/js?id=UA-179088031-1"
+-  ></script>
+-  <script>
+-    window.dataLayer = window.dataLayer || []
+-    function gtag() {
+-      dataLayer.push(arguments)
+-    }
+-    gtag("js", new Date())
+-
+-    gtag("config", "UA-179088031-1")
+-  </script>
+-
+-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+-  <link
+-    href="https://fonts.googleapis.com/css2?family=Inter:wght@300;600;800&display=swap"
+-    rel="stylesheet"
+-  />
+-  <link
+-    href="https://fonts.googleapis.com/css2?family=Roboto+Mono&display=swap"
+-    rel="stylesheet"
+-  />
+-  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+-</head>
+-<body>
+-  <div id="root"></div>
+-</body>
+diff --git a/app/public/community.html b/app/public/community.html
+deleted file mode 100644
+index be56567e..00000000
+--- a/app/public/community.html
++++ /dev/null
+@@ -1,46 +0,0 @@
+-<!doctype html>
+-<html>
+-  <head>
+-    <meta charset="UTF-8" />
+-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+-    <meta name="twitter:card" content="summary" />
+-    <meta property="og:title" content="signal" />
+-    <meta
+-      property="og:description"
+-      content="Fully Open-sourced Online MIDI Editor"
+-    />
+-    <meta
+-      property="og:image"
+-      content="https://signal.vercel.app/twitter-card.png"
+-    />
+-    <title data-i18n="community-title">signal - Online MIDI Editor</title>
+-
+-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+-    <link
+-      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;600;800&display=swap"
+-      rel="stylesheet"
+-    />
+-
+-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+-
+-    <!-- Global site tag (gtag.js) - Google Analytics -->
+-    <script
+-      async
+-      src="https://www.googletagmanager.com/gtag/js?id=UA-179088031-1"
+-    ></script>
+-    <script>
+-      window.dataLayer = window.dataLayer || []
+-      function gtag() {
+-        dataLayer.push(arguments)
+-      }
+-      gtag("js", new Date())
+-
+-      gtag("config", "UA-179088031-1")
+-    </script>
+-
+-    <base href="/" />
+-  </head>
+-  <body>
+-    <div id="root"></div>
+-  </body>
+-</html>
+diff --git a/app/public/edit.html b/app/public/edit.html
+deleted file mode 100644
+index 6992a87b..00000000
+--- a/app/public/edit.html
++++ /dev/null
+@@ -1,45 +0,0 @@
+-<!DOCTYPE html>
+-<meta charset="UTF-8" />
+-<title>signal</title>
+-<head>
+-  <meta
+-    content="initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0, user-scalable=no"
+-    name="viewport"
+-  />
+-  <!-- Global site tag (gtag.js) - Google Analytics -->
+-  <script
+-    async
+-    src="https://www.googletagmanager.com/gtag/js?id=UA-179088031-1"
+-  ></script>
+-  <script>
+-    window.dataLayer = window.dataLayer || []
+-    function gtag() {
+-      dataLayer.push(arguments)
+-    }
+-    gtag("js", new Date())
+-
+-    gtag("config", "UA-179088031-1")
+-  </script>
+-
+-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+-  <link
+-    href="https://fonts.googleapis.com/css2?family=Inter:wght@300;600;800&display=swap"
+-    rel="stylesheet"
+-  />
+-  <link
+-    href="https://fonts.googleapis.com/css2?family=Roboto+Mono&display=swap"
+-    rel="stylesheet"
+-  />
+-  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+-
+-  <!-- PWA -->
+-  <link rel="manifest" href="/manifest.webmanifest" />
+-  
+-  <meta name="apple-mobile-web-app-capable" content="yes" />
+-  <meta name="mobile-web-app-capable" content="yes" />
+-  <meta name="theme-color" content="#272a36" />
+-  <link rel="apple-touch-icon" sizes="192x192" href="/icon-192x192.png" />
+-</head>
+-<body>
+-  <div id="root"></div>
+-</body>
+diff --git a/app/src/components/Navigation/FileMenuButton.tsx b/app/src/components/Navigation/FileMenuButton.tsx
+index 16ab4bef..862107c3 100644
+--- a/app/src/components/Navigation/FileMenuButton.tsx
++++ b/app/src/components/Navigation/FileMenuButton.tsx
+@@ -4,6 +4,7 @@ import CloudOutlined from "mdi-react/CloudOutlineIcon"
+ import KeyboardArrowDown from "mdi-react/KeyboardArrowDownIcon"
+ import { FC, useCallback, useState } from "react"
+ import { hasFSAccess } from "../../actions/file"
++import { isEmbedded } from "../../helpers/platform"
+ import { useAuth } from "../../hooks/useAuth"
+ import { useExport } from "../../hooks/useExport"
+ import { useRootView } from "../../hooks/useRootView"
+@@ -52,7 +53,8 @@ export const FileMenuButton: FC = () => {
+ 
+       {user && <CloudFileMenu close={handleClose} />}
+ 
+-      {user === null && (
++      {/* WebSurge: embedded, there is no cloud to sign up for. */}
++      {user === null && !isEmbedded() && (
+         <>
+           <MenuDivider />
+           <MenuItem
+diff --git a/app/src/components/Navigation/Navigation.tsx b/app/src/components/Navigation/Navigation.tsx
+index 8ab5bb22..c49d6640 100644
+--- a/app/src/components/Navigation/Navigation.tsx
++++ b/app/src/components/Navigation/Navigation.tsx
+@@ -3,7 +3,11 @@ import Forum from "mdi-react/ForumIcon"
+ import Help from "mdi-react/HelpCircleIcon"
+ import Settings from "mdi-react/SettingsIcon"
+ import { CSSProperties, FC, MouseEvent, useCallback } from "react"
+-import { getPlatform, isRunningInElectron } from "../../helpers/platform"
++import {
++  getPlatform,
++  isEmbedded,
++  isRunningInElectron,
++} from "../../helpers/platform"
+ import { useRootView } from "../../hooks/useRootView"
+ import { useRouter } from "../../hooks/useRouter"
+ import ArrangeIcon from "../../images/icons/arrange.svg"
+@@ -221,7 +225,8 @@ export const Navigation: FC = () => {
+         </>
+       )}
+ 
+-      <UserButton />
++      {/* WebSurge: no account in an embedded build, so no sign-in button. */}
++      {!isEmbedded() && <UserButton />}
+     </Container>
+   )
+ }
+diff --git a/app/src/firebase/firebase.ts b/app/src/firebase/firebase.ts
+index f31fb335..cd4d1178 100644
+--- a/app/src/firebase/firebase.ts
++++ b/app/src/firebase/firebase.ts
+@@ -10,6 +10,7 @@ import {
+   connectFunctionsEmulator,
+   getFunctions,
+ } from "firebase/functions"
++import { isEmbedded } from "../helpers/platform"
+ 
+ const firebaseConfig = {
+   apiKey: process.env.FIREBASE_API_KEY,
+@@ -21,6 +22,15 @@ const firebaseConfig = {
+ }
+ 
+ const modules = (() => {
++  // WebSurge: an embedded build has no account and no cloud storage, so Firebase
++  // is never initialised and never contacted. Everything downstream already
++  // copes with these being null -- AuthStore observes no user, FileMenuButton
++  // shows the local file menu -- because that is the same state this module
++  // reports when the FIREBASE_* environment is missing.
++  if (isEmbedded()) {
++    return { app: null, auth: null, firestore: null, functions: null }
++  }
++
+   try {
+     const app = initializeApp(firebaseConfig)
+     const auth = getAuth(app)
+diff --git a/app/src/helpers/platform.ts b/app/src/helpers/platform.ts
+index 4dafadd2..4f3e9676 100644
+--- a/app/src/helpers/platform.ts
++++ b/app/src/helpers/platform.ts
+@@ -15,3 +15,13 @@ export function isRunningInElectron() {
+   // Check if we are running in Electron using the user agent
+   return navigator.userAgent.toLowerCase().indexOf(" electron/") > -1
+ }
++
++// WebSurge: true when this build is running inside an embedding page's iframe.
++//
++// An embedded build is a different product from signal-the-website: the
++// embedder is the synthesizer (see services/ParentPortOutput.ts) and there is
++// no account, so the SoundFont synth, Firebase and every sign-in affordance are
++// switched off. This is the one predicate all of that hangs off.
++export function isEmbedded() {
++  return window.parent !== window
++}
+diff --git a/app/src/index.tsx b/app/src/index.tsx
+index 419ced16..2d227314 100644
+--- a/app/src/index.tsx
++++ b/app/src/index.tsx
+@@ -1,14 +1,10 @@
+-import * as Sentry from "@sentry/browser"
+ import { configure } from "mobx"
+ import { createRoot } from "react-dom/client"
+ import { App } from "./components/App/App"
+ 
+-Sentry.init({
+-  dsn: process.env.SENTRY_DSN,
+-  environment: process.env.VERCEL_ENV,
+-  integrations: [Sentry.browserTracingIntegration()],
+-  tracesSampleRate: 1.0,
+-})
++// WebSurge: Sentry.init was here. An embedder shipping this build has no Sentry
++// project to report to and should not be sending anyone's edits off-site, so
++// crash reporting is removed rather than left configured with an empty DSN.
+ 
+ configure({
+   enforceActions: "never",
+@@ -17,15 +13,8 @@ configure({
+ const root = createRoot(document.querySelector("#root")!)
+ root.render(<App />)
+ 
+-if ("serviceWorker" in navigator && process.env.NODE_ENV === "production") {
+-  window.addEventListener("load", () => {
+-    navigator.serviceWorker
+-      .register("/service-worker.js", { scope: "/edit" })
+-      .then((registration) => {
+-        console.log("SW registered: ", registration)
+-      })
+-      .catch((registrationError) => {
+-        console.log("SW registration failed: ", registrationError)
+-      })
+-  })
+-}
++// WebSurge: the service-worker registration was here. It asked for
++// "/service-worker.js" at a "/edit" scope, both absolute, which an embedder
++// serving this build from a subdirectory cannot satisfy -- it would 404 and the
++// scope would be rejected. The generation step is dropped from the build script
++// to match.
+diff --git a/app/src/services/ParentPortOutput.ts b/app/src/services/ParentPortOutput.ts
+new file mode 100644
+index 00000000..63d06fa3
+--- /dev/null
++++ b/app/src/services/ParentPortOutput.ts
+@@ -0,0 +1,61 @@
++import { SendableEvent, SynthOutput } from "@signal-app/player"
++import { isEmbedded } from "../helpers/platform"
++
++// WebSurge: a SynthOutput that forwards MIDI to the embedding page.
++//
++// Everything that makes a sound in signal -- pressing a key in the piano
++// gutter, dragging a note, hitting play, an instrument preview -- ends up in
++// Player.sendEvent, which fans out through GroupOutput to whatever SynthOutputs
++// are enabled. MIDIOutput in this same directory is the existing example of a
++// SynthOutput that sends the events somewhere else instead of synthesizing
++// them. This is the same idea with an iframe boundary in place of a MIDI port,
++// so an embedding page can be the instrument.
++//
++// WHY delayMs AND NOT A TIMESTAMP
++// ------------------------------
++// SynthOutput.sendEvent is handed `delayTime` in seconds plus `timestampNow`,
++// a performance.now() reading, and the pair means "due delayTime after
++// timestampNow". performance.now() is measured from each browsing context's own
++// time origin, and an iframe's origin is not its parent's, so forwarding
++// timestampNow would hand the parent a number from a clock it does not share.
++// The delay is collapsed to a single relative figure here, at the moment of
++// posting, which needs no shared clock to interpret.
++export const SYNTH_OUTPUT_MESSAGE = "signal:synth-output"
++
++export interface SynthOutputMessage {
++  type: typeof SYNTH_OUTPUT_MESSAGE
++  event: SendableEvent
++  // Milliseconds from the moment this message was posted until the event is due.
++  delayMs: number
++}
++
++export class ParentPortOutput implements SynthOutput {
++  // Returns an output when embedded, or null when this page is the top frame,
++  // in which case the caller should use the built-in SoundFont synth.
++  static ifEmbedded(): ParentPortOutput | null {
++    return isEmbedded() ? new ParentPortOutput(window.parent) : null
++  }
++
++  private constructor(private readonly parent: Window) {}
++
++  activate() {
++    // Nothing to resume: the embedding page owns the audio graph, and cannot be
++    // brought out of suspension from in here anyway -- the user gesture that
++    // would allow it happened in the other frame.
++  }
++
++  sendEvent(
++    event: SendableEvent,
++    delayTime: number = 0,
++    timestampNow: number = performance.now(),
++  ): void {
++    const message: SynthOutputMessage = {
++      type: SYNTH_OUTPUT_MESSAGE,
++      event,
++      delayMs: delayTime * 1000 + (timestampNow - performance.now()),
++    }
++    // The embedder self-hosts this build, so it is same-origin and the target
++    // can be pinned rather than left as "*".
++    this.parent.postMessage(message, window.location.origin)
++  }
++}
+diff --git a/app/src/stores/RootStore.ts b/app/src/stores/RootStore.ts
+index 8f9c4c5f..e9db1a23 100644
+--- a/app/src/stores/RootStore.ts
++++ b/app/src/stores/RootStore.ts
+@@ -4,6 +4,7 @@ import { isRunningInElectron } from "../helpers/platform"
+ import { EventSource } from "../player/EventSource"
+ import { AutoSaveService } from "../services/AutoSaveService"
+ import { GroupOutput } from "../services/GroupOutput"
++import { ParentPortOutput } from "../services/ParentPortOutput"
+ import { MIDIActivity } from "../services/MIDIActivity"
+ import { MIDIInput } from "../services/MIDIInput"
+ import { MIDIMonitor } from "../services/MIDIMonitor"
+@@ -30,6 +31,10 @@ export default class RootStore {
+   readonly autoSaveService: AutoSaveService
+   readonly commands = new CommandService(this.songStore)
+ 
++  // WebSurge: non-null when embedded, and then it is the only synth. See
++  // ../services/ParentPortOutput.ts.
++  readonly parentPortOutput = ParentPortOutput.ifEmbedded()
++
+   constructor() {
+     const context = new (window.AudioContext || window.webkitAudioContext)()
+     this.synth = new SoundFontSynth(context)
+@@ -68,9 +73,15 @@ export default class RootStore {
+   }
+ 
+   async init() {
+-    await this.synth.setup()
+-    await this.soundFontStore.init()
+-    this.setupMetronomeSynth()
++    // WebSurge: an embedded build has no SoundFont synth to prepare, so it also
++    // makes none of the three CDN requests this would otherwise cause -- the
++    // ~30 MB A320U.sf2, the drum bank, and the synth worklet module. A static
++    // self-hosted site should not be reaching for a CDN at all.
++    if (this.parentPortOutput === null) {
++      await this.synth.setup()
++      await this.soundFontStore.init()
++      this.setupMetronomeSynth()
++    }
+     this.autoSaveService.startAutoSave()
+     this.bluetoothMIDIDeviceStore.autoConnect()
+   }
+diff --git a/app/src/stores/reactions.ts b/app/src/stores/reactions.ts
+index c98e75ae..7f964647 100644
+--- a/app/src/stores/reactions.ts
++++ b/app/src/stores/reactions.ts
+@@ -34,7 +34,7 @@ type Reaction = (rootStore: RootStore) => () => void
+ 
+ // sync synthGroup.output to enabledOutputIds/isFactorySoundEnabled
+ const updateOutputDevices: Reaction =
+-  ({ midiDeviceStore, player, synth, synthGroup }) =>
++  ({ midiDeviceStore, player, synth, synthGroup, parentPortOutput }) =>
+   () => {
+     const { outputs, enabledOutputs, isFactorySoundEnabled } = midiDeviceStore
+ 
+@@ -47,8 +47,17 @@ const updateOutputDevices: Reaction =
+ 
+     synthGroup.outputs = [
+       {
+-        synth: synth,
+-        isEnabled: isFactorySoundEnabled,
++        // WebSurge: embedded, the embedding page takes the factory sound's
++        // place. This has to happen HERE and not where RootStore first pushes
++        // an output, because this function owns the list -- it REPLACES
++        // synthGroup.outputs outright, and an autorun calls it immediately, so
++        // anything the constructor pushed is discarded a moment later.
++        synth: parentPortOutput ?? synth,
++        // Forced on when embedded: `isFactorySoundEnabled` is the Settings
++        // toggle for the SoundFont, which an embedded build does not load. Left
++        // tied to it, switching "factory sound" off would silence the embedder
++        // for no reason a person could work out from the label.
++        isEnabled: parentPortOutput !== null || isFactorySoundEnabled,
+       },
+       ...midiDeviceEntries,
+     ]
+diff --git a/app/vite.config.mts b/app/vite.config.mts
+index a058c27d..01f5b57a 100644
+--- a/app/vite.config.mts
++++ b/app/vite.config.mts
+@@ -41,16 +41,24 @@ export default defineConfig(({ mode }) => {
+         },
+       },
+     ],
++    // WebSurge: relative asset URLs, so the build can be served from any
++    // subdirectory of an embedder's site rather than only from the domain root.
++    base: "./",
+     build: {
+       rollupOptions: {
+         input: {
++          // Only the editor. auth.html and community.html were here; both are
++          // cloud front-ends an embedded build has no account for, and dropping
++          // them takes firebaseui out of the bundle.
+           main: path.resolve(__dirname, "edit.html"),
+-          auth: path.resolve(__dirname, "auth.html"),
+-          community: path.resolve(__dirname, "community.html"),
+         },
+       },
+-      minify: false,
+-      sourcemap: true,
++      // Upstream ships unminified with source maps, which is right for a site
++      // you debug in the wild. An embedder commits this output to a git repo, so
++      // it is minified and the ~11 MB of maps are not generated. The source it
++      // was built from is a pinned commit plus a patch, both in that repo.
++      minify: true,
++      sourcemap: false,
+     },
+     publicDir: "public",
+     server: {

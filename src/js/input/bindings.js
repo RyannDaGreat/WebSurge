@@ -84,6 +84,13 @@ export const BINDINGS = [
     label: 'Notation',
     run: (app) => app.setInputMode('notation'),
   },
+  {
+    id: 'mode-signal',
+    chord: 'ctrl+4',
+    group: 'Input mode',
+    label: 'signal (MIDI editor)',
+    run: (app) => app.setInputMode('signal'),
+  },
 
   {
     id: 'help',
