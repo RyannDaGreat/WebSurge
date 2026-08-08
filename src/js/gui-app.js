@@ -19,8 +19,11 @@
 'use strict';
 
 import { attachKeyboard } from './keyboard.js';
-import { patchesFromArchive, buildPatchTree } from './patches.js';
-import { fetchSurgeData, unpackInto, SURGE_DATA_ROOT } from './surge-data.js';
+import { buildPatchIndex, buildPatchTree } from './patches.js';
+import {
+  fetchSurgeData, fetchRemoteIndex, fetchRemotePatch,
+  unpackInto, writeFileInto, SURGE_DATA_ROOT,
+} from './surge-data.js';
 import { createPiano } from './piano.js';
 
 const GUI_MODULE = './surge-gui.js';
@@ -32,6 +35,24 @@ const DATA_PATH = SURGE_DATA_ROOT;
 
 const $ = (id) => document.getElementById(id);
 const setStatus = (m) => { $('status').textContent = m; };
+
+/**
+ * Command. Shows the progress bar.
+ *
+ * @param {number|null} fraction - 0..1, or null for indeterminate (a request
+ *        whose total size the server did not declare)
+ */
+function setProgress(fraction) {
+  const bar = $('progress');
+  bar.hidden = false;
+  bar.classList.toggle('indeterminate', fraction === null);
+  bar.style.setProperty('--progress', fraction === null ? 1 : Math.max(0, Math.min(1, fraction)));
+}
+
+/** Command. Hides the progress bar. */
+function clearProgress() {
+  $('progress').hidden = true;
+}
 
 function fail(message, err) {
   console.error(message, err || '');
@@ -87,6 +108,7 @@ class SurgeGuiApp {
     setStatus('loading Surge GUI...');
     const { default: createSurgeGui } = await import(GUI_MODULE);
     const M = await createSurgeGui();
+    this.M = M;   // kept: patches fetched later are written into this filesystem
     this.gui = M;
 
     const c = (n, r, a) => M.cwrap(n, r, a);
@@ -114,10 +136,19 @@ class SurgeGuiApp {
 
     // Mount BEFORE init: SurgeStorage scans for patches in its constructor, so
     // a tree that appears afterwards is invisible to Surge forever.
+    setStatus('downloading Surge resources...');
+    setProgress(0);
+    const [surgeData, remotePaths] = await Promise.all([
+      fetchSurgeData((received, total) => setProgress(total ? received / total : null)),
+      fetchRemoteIndex(),
+    ]);
+    this.surgeData = surgeData;
+    this.remoteCache = new Set();
+
     setStatus('mounting Surge resources...');
-    this.surgeData = await fetchSurgeData();
+    clearProgress();
     buildPatchTree($('patch-list'),
-      patchesFromArchive(this.surgeData.files, SURGE_DATA_ROOT),
+      buildPatchIndex(this.surgeData.files.map((f) => f.p), remotePaths, SURGE_DATA_ROOT),
       (e) => this.loadPatch(e));
     const mounted = unpackInto(M.FS, this.surgeData.files, this.surgeData.bytes);
 
@@ -372,9 +403,31 @@ class SurgeGuiApp {
    * the GUI module and the worklet alike, so both can be handed the same path
    * and let Surge's own loader read it.
    */
-  loadPatch(entry) {
+  async loadPatch(entry) {
     setStatus(`loading ${entry.name}...`);
     try {
+      // A remote patch has to exist in BOTH filesystems before either Surge is
+      // asked for it -- the engine loads by path just like the GUI does.
+      if (entry.remote && !this.remoteCache.has(entry.archivePath)) {
+        setProgress(null);
+        const bytes = await fetchRemotePatch(entry.archivePath);
+
+        writeFileInto(this.M.FS, entry.archivePath, bytes);
+        // The worklet has its own heap, so the bytes are copied over rather than
+        // shared. `loadPatch` writes them there and loads in one step.
+        this.node?.port.postMessage(
+          { type: 'loadPatch', path: entry.path, name: entry.name, bytes: bytes.buffer.slice(0) });
+
+        this.remoteCache.add(entry.archivePath);
+        clearProgress();
+
+        const ok = this.sg.loadPatch(entry.path, entry.name);
+        this.sg.invalidate();
+        setStatus(ok ? `Patch: ${entry.name}` : `Surge refused patch: ${entry.name}`);
+        if (!ok) fail(`Surge refused the patch "${entry.name}"`);
+        return;
+      }
+
       const ok = this.sg.loadPatch(entry.path, entry.name);
       this.node?.port.postMessage({ type: 'loadPatchPath', path: entry.path, name: entry.name });
 
@@ -382,6 +435,7 @@ class SurgeGuiApp {
       setStatus(ok ? `Patch: ${entry.name}` : `Surge refused patch: ${entry.name}`);
       if (!ok) fail(`Surge refused the patch "${entry.name}"`);
     } catch (err) {
+      clearProgress();
       fail(`Could not load patch "${entry.name}"`, err);
     }
   }
@@ -390,6 +444,10 @@ class SurgeGuiApp {
 /* ------------------------------------------------------------------ */
 
 const app = new SurgeGuiApp();
+
+// Exposed for the browser tests in tools/ and .frenzy/, which drive the real
+// page rather than a mock. Nothing in the app reads this.
+window.__app = app;
 
 async function main() {
   $('start-btn').addEventListener('click', async () => {

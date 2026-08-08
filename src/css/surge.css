@@ -11,6 +11,11 @@
  */
 
 :root {
+  --progress-h: 3px;
+  --progress-w: 160px;
+  --progress-track: #2a2f3a;
+  --progress-fill: #ff9000;
+  --progress-sweep-s: 1.1s;
   /* Surge's native panel size, from globals.h BASE_WINDOW_SIZE_X/Y. */
   --panel-w: 913px;
   --panel-h: 569px;
@@ -356,4 +361,38 @@ button.patch.selected { background: var(--accent); color: #000; }
   font-size: 8px;
   color: var(--dim);
   pointer-events: none;
+}
+
+
+/* ---- download progress ---------------------------------------------------
+   Two modes. With a Content-Length the fill tracks the real fraction; without
+   one it sweeps, so a long download never looks like a hung page. */
+.progress {
+  width: var(--progress-w);
+  height: var(--progress-h);
+  background: var(--progress-track);
+  border-radius: var(--progress-h);
+  overflow: hidden;
+  position: relative;
+}
+
+.progress::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  transform-origin: left;
+  transform: scaleX(var(--progress, 0));
+  background: var(--progress-fill);
+  transition: transform 120ms linear;
+}
+
+.progress.indeterminate::after {
+  transform: none;
+  width: 40%;
+  animation: progress-sweep var(--progress-sweep-s) ease-in-out infinite;
+}
+
+@keyframes progress-sweep {
+  from { left: -40%; }
+  to   { left: 100%; }
 }

@@ -38,9 +38,7 @@ const QUANTUM = 128;
  * @param {string} root - mount point
  */
 function mountSurgeData(FS, files, bytes, root) {
-  const mk = (path) => {
-    try { FS.mkdir(path); } catch (err) { if (err && err.code !== 'EEXIST') throw err; }
-  };
+  const mk = (path) => makeDirs(FS, path);
   mk(root);
 
   const dirs = new Set();
@@ -57,6 +55,65 @@ function mountSurgeData(FS, files, bytes, root) {
 
   const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
   for (const f of files) FS.writeFile(`${root}/${f.p}`, data.subarray(f.o, f.o + f.n));
+}
+
+/**
+ * Pure function. Renders any thrown value as readable text.
+ *
+ * Emscripten's ErrnoError carries `errno` and no `message`, so the default
+ * interpolation of it is the string "[object Object]" -- which says nothing at
+ * all about what went wrong.
+ *
+ * @param {unknown} err
+ * @returns {string}
+ *
+ * @example describeError(new Error('nope'))   // 'nope'
+ * @example describeError({ errno: 44 })       // 'errno 44'
+ */
+function describeError(err) {
+  if (!err) return String(err);
+  if (err.message) return err.message;
+  if (err.errno !== undefined) return `errno ${err.errno}${err.code ? ` (${err.code})` : ''}`;
+  try { return JSON.stringify(err); } catch { return String(err); }
+}
+
+/**
+ * Command. Creates every parent directory of an absolute MEMFS path.
+ *
+ * MEMFS has no mkdir -p, so the path is walked from the root down.
+ *
+ * @param {object} FS - the Emscripten filesystem
+ * @param {string} path - absolute file path, e.g. '/SurgeXTData/a/b/Patch.fxp'
+ */
+function makeParentDirs(FS, path) {
+  const parts = path.split('/').filter(Boolean);
+  parts.pop(); // the filename
+
+  let acc = '';
+  for (const part of parts) {
+    acc += `/${part}`;
+    makeDirs(FS, acc);
+  }
+}
+
+/**
+ * Command. Creates `path` and any missing parents. Absolute paths only.
+ *
+ * Existence is TESTED rather than mkdir-and-catch-EEXIST. Emscripten only
+ * populates ErrnoError's `.code` and `.message` when built with assertions, so
+ * the engine module -- which is not -- raises a bare `{errno: 20}` that no
+ * string comparison recognises. Testing first also means a real failure (a
+ * permissions problem, a file where a directory should be) propagates loudly
+ * instead of being swallowed by an over-broad catch.
+ *
+ * @param {object} FS - the Emscripten filesystem
+ * @param {string} dir - absolute directory path
+ *
+ * @example makeDirs(FS, '/SurgeXTData/patches_3rdparty/A.Liv/Basses')
+ */
+function makeDirs(FS, dir) {
+  if (FS.analyzePath(dir).exists) return;
+  FS.mkdir(dir);
 }
 
 class SurgeProcessor extends AudioWorkletProcessor {
@@ -204,12 +261,17 @@ class SurgeProcessor extends AudioWorkletProcessor {
   loadPatch(path, name, bytes) {
     const M = this.engine;
     try {
+      // Patches fetched on demand land in directories that were never mounted
+      // -- only the factory bank and wavetables are in the startup archive. A
+      // bare writeFile into a missing directory fails with an ErrnoError whose
+      // .message is undefined, which is a genuinely unhelpful thing to report.
+      makeParentDirs(M.FS, path);
       M.FS.writeFile(path, new Uint8Array(bytes));
       const ok = this.sh.loadPatchPath(path, name);
       this.port.postMessage({ type: 'patchLoaded', name, ok: !!ok });
       if (!ok) this.port.postMessage({ type: 'error', message: `Surge refused patch "${name}"` });
     } catch (err) {
-      this.port.postMessage({ type: 'error', message: `Loading "${name}" failed: ${err.message}` });
+      this.port.postMessage({ type: 'error', message: `Loading "${name}" failed: ${describeError(err)}` });
     }
   }
 

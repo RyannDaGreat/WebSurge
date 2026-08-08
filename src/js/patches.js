@@ -1,10 +1,17 @@
 /**
  * patches.js -- the patch browser.
  *
- * The browsable list is derived from the packed archive that is already mounted
- * into both wasm filesystems, so selecting a patch is a filesystem read rather
- * than a download. There is no separate index to drift out of sync with what
- * the deploy actually contains.
+ * The list comes from two places, and the browser deliberately does not
+ * distinguish between them beyond one flag:
+ *
+ *   - the packed archive already mounted into both wasm filesystems, so
+ *     selecting one of those patches is a filesystem read, not a download
+ *   - a manifest of patches served as ordinary files, fetched when picked
+ *
+ * The split exists only because the 3rd-party bank is 241 MB and cannot go in a
+ * startup download. Both kinds end up as the same shape of entry, and the only
+ * difference downstream is that a `remote` entry needs its bytes fetched and
+ * written into the filesystem before Surge is asked to load it.
  */
 
 'use strict';
@@ -30,20 +37,55 @@
  * //                path: '/SurgeXTData/patches_factory/Basses/Sub.fxp' } ] }
  */
 export function patchesFromArchive(files, root) {
-  const BANKS = { patches_factory: 'Factory', patches_3rdparty: '3rd Party' };
+  return buildPatchIndex(files.map((f) => f.p), [], root);
+}
+
+/** Directory name under the data root -> the label shown in the sidebar. */
+const BANKS = { patches_factory: 'Factory', patches_3rdparty: '3rd Party' };
+
+/**
+ * Pure function. Builds the full browsable index from both sources.
+ *
+ * `path` is always where the file lives in the wasm filesystem, never a URL --
+ * remote patches are written to exactly that path once fetched, so by the time
+ * Surge is asked to load one there is no difference between the two kinds.
+ *
+ * @param {string[]} mounted - archive-relative paths already in the filesystem
+ * @param {string[]} remote - archive-relative paths fetched on demand
+ * @param {string} root - the mount point
+ * @returns {{patches: Array<{name:string, category:string, bank:string,
+ *            path:string, remote:boolean, archivePath:string}>}}
+ *
+ * @example
+ * buildPatchIndex(['patches_factory/Basses/Sub.fxp'],
+ *                 ['patches_3rdparty/Pads/Big.fxp'], '/SurgeXTData')
+ * // { patches: [
+ * //     { name:'Sub', category:'Basses', bank:'Factory', remote:false,
+ * //       path:'/SurgeXTData/patches_factory/Basses/Sub.fxp', … },
+ * //     { name:'Big', category:'Pads',   bank:'3rd Party', remote:true,  … } ] }
+ */
+export function buildPatchIndex(mounted, remote, root) {
   const patches = [];
 
-  for (const f of files) {
-    if (!f.p.endsWith('.fxp')) continue;
+  const add = (archivePath, isRemote) => {
+    if (!archivePath.endsWith('.fxp')) return;
 
-    const parts = f.p.split('/');
+    const parts = archivePath.split('/');
     const bank = BANKS[parts[0]];
-    if (!bank) continue;
+    if (!bank) return;
 
-    const name = parts[parts.length - 1].replace(/\.fxp$/, '');
-    const category = parts.slice(1, -1).join('/') || '(root)';
-    patches.push({ name, category, bank, path: `${root}/${f.p}` });
-  }
+    patches.push({
+      name: parts[parts.length - 1].replace(/\.fxp$/, ''),
+      category: parts.slice(1, -1).join('/') || '(root)',
+      bank,
+      path: `${root}/${archivePath}`,
+      archivePath,
+      remote: isRemote,
+    });
+  };
+
+  for (const path of mounted) add(path, false);
+  for (const path of remote) add(path, true);
 
   patches.sort((a, b) =>
     a.bank.localeCompare(b.bank) ||

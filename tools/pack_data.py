@@ -39,6 +39,16 @@ BANKS = ["patches_factory", "wavetables"]
 BIN_NAME = "surge-data.bin"
 INDEX_NAME = "surge-data.json"
 
+# Banks too large to put in the startup archive. Their patches are served as
+# ordinary files and fetched when the user picks one.
+#
+# All 3559 patches in one archive would be a 271 MB download before the page can
+# make a sound. Splitting keeps startup at ~29 MB while still offering the whole
+# library: the factory bank is mounted up front so Surge's own browser works
+# immediately, and the 3rd-party bank streams in on demand.
+REMOTE_BANKS = ["patches_3rdparty"]
+REMOTE_NAME = "surge-remote.json"
+
 
 def collect(bank):
     """
@@ -110,7 +120,20 @@ def main():
         json.dumps({"files": entries}, separators=(",", ":"))
     )
 
-    print(f"\nWrote {BIN_NAME}  {len(blob) / 1048576:.1f} MiB")
+    # Manifest of the on-demand banks: paths only, no bytes.
+    remote = []
+    for bank in REMOTE_BANKS:
+        found = [a for a, _ in collect(bank) if a.endswith(".fxp")]
+        print(f"  {bank:20s} {len(found):5d} files (fetched on demand)")
+        remote += found
+
+    (DATA_DIR / REMOTE_NAME).write_text(
+        json.dumps({"files": remote}, separators=(",", ":"))
+    )
+
+    print(f"\nWrote {REMOTE_NAME} {len(remote)} on-demand patches, "
+          f"{(DATA_DIR / REMOTE_NAME).stat().st_size / 1024:.0f} KiB")
+    print(f"Wrote {BIN_NAME}  {len(blob) / 1048576:.1f} MiB")
     print(f"Wrote {INDEX_NAME} {len(entries)} entries, "
           f"{(DATA_DIR / INDEX_NAME).stat().st_size / 1024:.0f} KiB")
 

@@ -21,6 +21,11 @@
 /src/data/*
 !/src/data/surge-data.bin
 !/src/data/surge-data.json
+!/src/data/surge-remote.json
+# The 3rd-party bank IS committed, as loose files rather than in the archive:
+# 241 MB in the startup download would be unusable, but as individual files each
+# patch costs nothing until someone actually picks it.
+!/src/data/patches_3rdparty/
 
 # Emscripten build products.
 #
