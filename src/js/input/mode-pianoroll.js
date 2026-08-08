@@ -192,6 +192,12 @@ let colorProbe = null;
  * @example toRgb('oklch(0.205 0 none)')  // [39, 39, 39]  (an achromatic grey)
  */
 function toRgb(color) {
+  // The node test suite exercises the pure paths with no DOM. Say that plainly
+  // rather than letting "document is not defined" surface from three frames in.
+  if (typeof document === 'undefined') {
+    throw new Error(`Cannot read a colour out of "${color}" without a browser to parse it`);
+  }
+
   if (colorProbe === null) {
     colorProbe = document.createElement('canvas').getContext('2d', { willReadFrequently: true });
   }
@@ -207,7 +213,7 @@ function toRgb(color) {
   colorProbe.fillStyle = '#ffffff';
   colorProbe.fillStyle = color;
   if (colorProbe.fillStyle !== first) {
-    throw new Error(`"${color}" is not a colour this browser can parse`);
+    throw new Error(`Cannot read a colour out of "${color}" -- the browser rejected it`);
   }
 
   colorProbe.clearRect(0, 0, 1, 1);
