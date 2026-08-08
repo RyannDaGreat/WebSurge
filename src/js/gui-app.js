@@ -19,7 +19,7 @@
 'use strict';
 
 import { attachKeyboard } from './keyboard.js';
-import { loadPatchIndex, buildPatchTree } from './patches.js';
+import { patchesFromArchive, buildPatchTree } from './patches.js';
 import { fetchSurgeData, unpackInto, SURGE_DATA_ROOT } from './surge-data.js';
 import { createPiano } from './piano.js';
 
@@ -116,6 +116,9 @@ class SurgeGuiApp {
     // a tree that appears afterwards is invisible to Surge forever.
     setStatus('mounting Surge resources...');
     this.surgeData = await fetchSurgeData();
+    buildPatchTree($('patch-list'),
+      patchesFromArchive(this.surgeData.files, SURGE_DATA_ROOT),
+      (e) => this.loadPatch(e));
     const mounted = unpackInto(M.FS, this.surgeData.files, this.surgeData.bytes);
 
     if (!this.sg.init(SURGE_DATA_ROOT)) {
@@ -362,21 +365,18 @@ class SurgeGuiApp {
   }
 
   /** Command. Loads a patch into BOTH instances so picture and sound agree. */
-  async loadPatch(entry) {
+  /**
+   * Command. Loads a patch that is already in both filesystems.
+   *
+   * No fetch and no byte transfer: the archive mounted at startup is present in
+   * the GUI module and the worklet alike, so both can be handed the same path
+   * and let Surge's own loader read it.
+   */
+  loadPatch(entry) {
     setStatus(`loading ${entry.name}...`);
     try {
-      const res = await fetch(entry.path);
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const bytes = new Uint8Array(await res.arrayBuffer());
-
-      // GUI instance: write into its filesystem and let Surge parse the fxp.
-      this.gui.FS.writeFile('/tmp/patch.fxp', bytes);
-      const ok = this.sg.loadPatch('/tmp/patch.fxp', entry.name);
-
-      // Audio instance: same bytes, its own filesystem.
-      const copy = bytes.slice().buffer;
-      this.node?.port.postMessage(
-        { type: 'loadPatch', path: '/tmp/patch.fxp', name: entry.name, bytes: copy }, [copy]);
+      const ok = this.sg.loadPatch(entry.path, entry.name);
+      this.node?.port.postMessage({ type: 'loadPatchPath', path: entry.path, name: entry.name });
 
       this.sg.invalidate();
       setStatus(ok ? `Patch: ${entry.name}` : `Surge refused patch: ${entry.name}`);
@@ -392,10 +392,6 @@ class SurgeGuiApp {
 const app = new SurgeGuiApp();
 
 async function main() {
-  loadPatchIndex()
-    .then((index) => buildPatchTree($('patch-list'), index, (e) => app.loadPatch(e)))
-    .catch((err) => fail('Could not load the patch index', err));
-
   $('start-btn').addEventListener('click', async () => {
     $('start-btn').disabled = true;
     try {

@@ -165,6 +165,17 @@ class SurgeProcessor extends AudioWorkletProcessor {
       case 'cc': sh.cc(msg.channel | 0, msg.cc | 0, msg.value | 0); break;
       case 'setParam': sh.setParam(msg.index | 0, msg.value); break;
 
+      case 'loadPatchPath': {
+        // The archive is mounted here too, so the path alone is enough -- no
+        // need to ship the bytes across from the main thread.
+        const ok = sh.loadPatchPath(msg.path, msg.name);
+        this.port.postMessage({ type: 'patchLoaded', name: msg.name, ok: !!ok });
+        if (!ok) {
+          this.port.postMessage({ type: 'error', message: `Surge refused patch "${msg.name}"` });
+        }
+        break;
+      }
+
       case 'loadPatch':
         // The .fxp bytes are written into the Emscripten filesystem and handed to
         // Surge's own loader, so the browser never reimplements the fxp format.

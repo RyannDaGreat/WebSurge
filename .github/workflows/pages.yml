@@ -41,24 +41,15 @@ jobs:
           for f in src/index.html \
                    src/js/surge-gui.js src/js/surge-gui.wasm \
                    src/js/surge-engine.js src/js/surge-engine.wasm \
-                   src/js/surge-worklet-bundle.js; do
+                   src/js/surge-worklet-bundle.js \
+                   src/data/surge-data.bin src/data/surge-data.json; do
             if [ ! -f "$f" ]; then echo "MISSING: $f"; missing=1; fi
           done
           [ "$missing" -eq 0 ] || {
-            echo "Run ./build.sh and ./build_gui.sh, then commit src/js/."
+            echo "Run ./build.sh, ./build_gui.sh and 'uv run tools/pack_data.py',"
+            echo "then commit src/js/ and src/data/surge-data.*"
             exit 1
           }
-
-      - name: Install uv
-        run: curl -LsSf https://astral.sh/uv/install.sh | sh
-
-      - name: Regenerate the patch index from committed data
-        # Deliberately regenerated rather than committed: the index must describe
-        # exactly what this deploy contains. A stale index lists patches that are
-        # not here, and the browser 404s on click.
-        run: |
-          export PATH="$HOME/.local/bin:$PATH"
-          uv run tools/gen_patch_index.py
 
       - uses: actions/configure-pages@v5
 

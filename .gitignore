@@ -13,9 +13,14 @@
 # reproducible from the pinned Surge SHA and would push the repo past what is
 # reasonable, so it stays out. Run tools/stage_data.sh to get the full set
 # locally; the site simply lists fewer patches without it.
+# Only the packed archive is deployed. The loose banks are BUILD INPUT for
+# tools/pack_data.py -- committing them too would ship every factory patch
+# twice, once loose and once inside the archive. The browser reads only the
+# archive: Surge mounts it, and the sidebar loads patches from that same mounted
+# filesystem rather than fetching files over HTTP.
 /src/data/*
-!/src/data/patches_factory/
-!/src/data/wavetables/
+!/src/data/surge-data.bin
+!/src/data/surge-data.json
 
 # Emscripten build products.
 #

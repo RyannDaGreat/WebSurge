@@ -1,29 +1,56 @@
 /**
  * patches.js -- the patch browser.
  *
- * Surge ships thousands of .fxp patches across a factory bank and a 3rd-party
- * bank. They are far too large to preload, so only a generated index is fetched
- * at startup and the individual .fxp is downloaded when the user picks it.
+ * The browsable list is derived from the packed archive that is already mounted
+ * into both wasm filesystems, so selecting a patch is a filesystem read rather
+ * than a download. There is no separate index to drift out of sync with what
+ * the deploy actually contains.
  */
 
 'use strict';
 
-const PATCH_INDEX_URL = 'data/patches.json';
-
 /**
- * Query. Fetches the generated patch index.
+ * Pure function. Turns the packed-archive file list into browsable patch entries.
  *
- * Throws rather than returning an empty list on failure: an empty patch browser
- * that looks merely "unpopulated" would hide a broken deployment.
+ * There is no separate patch index any more. The archive already lists every
+ * file, and deriving the browser from it means the sidebar cannot advertise a
+ * patch the deploy does not contain -- a whole class of 404-on-click bugs that
+ * a second, independently generated index invites.
  *
- * @returns {Promise<{patches: Array<{name: string, category: string, bank: string, path: string}>}>}
+ * `path` is where the file lives in the MOUNTED filesystem, not a URL: the
+ * patch is loaded from there rather than fetched, since Surge already has it.
+ *
+ * @param {Array<{p: string}>} files - entries from surge-data.json
+ * @param {string} root - the mount point
+ * @returns {{patches: Array<{name:string, category:string, bank:string, path:string}>}}
+ *
+ * @example
+ * patchesFromArchive([{p: 'patches_factory/Basses/Sub.fxp'}], '/SurgeXTData')
+ * // { patches: [ { name: 'Sub', category: 'Basses', bank: 'Factory',
+ * //                path: '/SurgeXTData/patches_factory/Basses/Sub.fxp' } ] }
  */
-export async function loadPatchIndex() {
-  const res = await fetch(PATCH_INDEX_URL);
-  if (!res.ok) {
-    throw new Error(`${PATCH_INDEX_URL} -> HTTP ${res.status}. Run tools/gen_patch_index.py`);
+export function patchesFromArchive(files, root) {
+  const BANKS = { patches_factory: 'Factory', patches_3rdparty: '3rd Party' };
+  const patches = [];
+
+  for (const f of files) {
+    if (!f.p.endsWith('.fxp')) continue;
+
+    const parts = f.p.split('/');
+    const bank = BANKS[parts[0]];
+    if (!bank) continue;
+
+    const name = parts[parts.length - 1].replace(/\.fxp$/, '');
+    const category = parts.slice(1, -1).join('/') || '(root)';
+    patches.push({ name, category, bank, path: `${root}/${f.p}` });
   }
-  return res.json();
+
+  patches.sort((a, b) =>
+    a.bank.localeCompare(b.bank) ||
+    a.category.toLowerCase().localeCompare(b.category.toLowerCase()) ||
+    a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+
+  return { patches };
 }
 
 /**
