@@ -41,6 +41,9 @@ const ENGINE_WASM = 'js/surge-engine.wasm';
 /** Where Surge's resources are mounted inside each Emscripten filesystem. */
 const DATA_PATH = SURGE_DATA_ROOT;
 
+/** The input modes, in picker order. Also the registry's contents. */
+const INPUT_MODES = [keyboardMode, pianoRollMode, notationMode];
+
 const $ = (id) => document.getElementById(id);
 const setStatus = (m) => { $('status').textContent = m; };
 
@@ -399,16 +402,10 @@ class SurgeGuiApp {
       setModeStatus: (text) => { $('kb-state').textContent = text; },
     };
 
-    this.modes = createModeRegistry(
-      [keyboardMode, pianoRollMode, notationMode], this.io, $('mode-panel'));
+    this.modes = createModeRegistry(INPUT_MODES, this.io, $('mode-panel'));
 
     const picker = $('mode-select');
-    for (const mode of this.modes.modes()) {
-      const option = document.createElement('option');
-      option.value = mode.id;
-      option.textContent = mode.label;
-      picker.append(option);
-    }
+    picker.disabled = false;
     picker.addEventListener('change', () => this.setInputMode(picker.value));
 
     this.shortcutKey = createShortcutKey(BINDINGS);
@@ -613,6 +610,18 @@ async function main() {
   // Before anything else: the start overlay is the first thing on screen, and
   // without a skin applied the page renders as unstyled default HTML.
   initThemePicker($('theme-select'));
+
+  // Fill the input picker now rather than in attachKeys(), which does not run
+  // until Start is pressed -- the toolbar showed an empty dropdown until then.
+  // Disabled until there is an engine to send notes to.
+  const picker = $('mode-select');
+  picker.disabled = true;
+  for (const mode of INPUT_MODES) {
+    const option = document.createElement('option');
+    option.value = mode.id;
+    option.textContent = mode.label;
+    picker.append(option);
+  }
 
   $('start-btn').addEventListener('click', async () => {
     $('start-btn').disabled = true;
