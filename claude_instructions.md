@@ -26,6 +26,42 @@ sliders is a known, explicitly rejected failure mode — that already exists (se
 4. `qwertyuiop[]\` and `zxcvbnm,./` play notes.
 5. Static site: `python3 -m http.server` in `src/` and it works. No backend.
 
+### The user's own words
+
+Verbatim, in the order given. This section exists because paraphrasing lost a
+requirement once already: the user asked for an open-source piano roll, was
+given `webaudio-pianoroll`, and got a hand-rolled 16-step grid instead — because
+the link was never written down here. **When the user states a requirement, it
+goes in this list before any code is written.**
+
+| # | Verbatim | Where it lives |
+| --- | --- | --- |
+| 1 | *"port this to WASM … I want the full GUI in the browser with my keyboard to play notes"* | §1, §3 |
+| 2 | *"oh and I need all their patches"* / *"ALSO WHY ONLY FACTORY PATCHES :( i want ALL the patches"* | §5 — all 3559 |
+| 3 | *"im not interested in quick hacks. I need the full thing or nothing."* | `CLAUDE.md`, governing |
+| 4 | *"qwertyuiop[]\ and zxcvbnm,./ to be major notes on my keyboard"* | §8 |
+| 5 | *"what in the fucking temu-ass gui is this? this is not the orignal GUI"* | §3 — the DOM reimplementation was deleted |
+| 6 | *"--tls should be default"* + *"it must report lan ip"* | `run_server.sh` |
+| 7 | *"Surge is vector graphics lol why not make it resizable"* | zoom + HiDPI |
+| 8 | *"a piano on the bottom … 100% width of browser … all 128 midi keys"* | `src/js/piano.js` |
+| 9 | *"how possible is it to host this on github pages"* → *"make it github-pages ready"* | §12 |
+| 10 | *"u can trash ur legacy one whose existence started 10 mintues ago and just use mine"* | the Actions workflow was deleted; branch build only |
+| 11 | *"can you make 10 UNIQUE themes with a theme dropdown … I love their homepage with teh stripes"* | §13 |
+| 12 | *"as little claude-based CSS as possible and as much tailwind as possible"* | §13 — `surge.css` deleted, 398 lines to 0 |
+| 13 | *"more than just a CSS overhaul...entire skins for the app. Modern sleek"* | §13 |
+| 14 | *"some seem a bit Ungapatchka … tailwind is usually for SLEEK themes not skeumorphic. keep all but add 5 more"* | 5 sleeker skins added |
+| 15 | *"we gonna need more keyboard shortcuts, and a PROPER key this time. with next/prev patch keys"* | §8, §14 — the legend |
+| 16 | *"can we have multiple input midi modes? … default …, the piano roll editor, and this notation thing but maybe with a vscodeium spruce-up"* <https://www.abcjs.net/abcjs-editor> | §14 |
+| 17 | *"Modularize it tho"* | §14 — the mode registry |
+| 18 | **The piano roll:** <https://github.com/g200kg/webaudio-pianoroll>. Asked for as *"open source piano roll editors we can make this wokr with in the web"*. **Integrate this component; do not reimplement it.** | §14 |
+| 19 | *"would be nice if there was a pitch bend / mod wheel / midi knobs that interact with the presets"* | §15 |
+| 20 | *"we gonna be piping midi into it later"* | Backburner — Web MIDI |
+| 21 | The "Claire Song" (FL Studio screenshot, `.frenzy/ref/claire.png`) as a roll preset. **Cannot be transcribed from the image** — 400+ notes, most labels truncated. Needs the MIDI/FLP. Do not fabricate it. | §14 |
+
+Not recorded here on purpose: a GitHub token the user pasted in a push command.
+It was invalid, was stripped from `.git/config`, and rotation was advised. Do not
+re-add it anywhere.
+
 ## 2. Glossary
 
 Read this before anything else. Terms are used throughout without re-explanation.
