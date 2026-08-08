@@ -43,6 +43,14 @@ Read this before anything else. Terms are used throughout without re-explanation
 | **AudioWorklet** | Browser API for running audio DSP on the realtime audio thread. Fixed 128-frame render quantum. |
 | **simde** | *SIMD everywhere* — header library that maps SSE intrinsics to other targets, including WASM SIMD128. Surge depends on it heavily. |
 | **VLM check** | Screenshotting output and having a vision model verify it looks right. Mandatory before claiming any GUI work succeeded. |
+| **peer** | Our `WasmComponentPeer` (`host/surge_wasm/`) — the platform layer JUCE expects. Owns an ARGB `juce::Image` that gets blitted to the `<canvas>`. One per top-level window, so an open popup menu is a second peer. |
+| **skin** | One of the ten page-chrome looks. A table of 31 Tailwind class strings, NOT a palette — skins differ in layout, type and density. Nothing to do with Surge's own "classic skin". See §12. |
+| **region** | One styleable part of the chrome (`toolbar`, `sidebar`, `piano`, …). Every skin defines a class string for all 31. |
+| **input mode** | A way of turning intent into notes: computer keyboard, piano roll, notation. One active at a time. See §13. |
+| **io** | The `{noteOn, noteOff, allNotesOff, setModeStatus}` object handed to an input mode. Its only channel to make sound. |
+| **legend** | The `?` overlay listing every shortcut. Generated from the binding table, so it cannot drift. "Key" as in the key to a map. |
+| **startup archive / on-demand bank** | The two patch tiers — 29 MiB fetched up front, 2920 patches fetched on click. See §5. |
+| **frenzy** | Ten (or N) parallel subagents on diversified prompts. From the root `CLAUDE.md`; used here for the skins. Scratch output lives in `.frenzy/`, which is gitignored. |
 
 ## 3. Architecture
 
@@ -108,27 +116,47 @@ Browser main thread                    Audio thread (AudioWorklet)
 ### Running it
 
 ```sh
-./setup.sh                        # emsdk 6.0.0 + Surge at the pinned SHA + patches
-./build.sh                        # engine -> src/js/surge-engine.{js,wasm} + worklet bundle
-./tools/gen_layout.sh             # src/layout.json + src/skin/ from Surge's skin model
+./setup.sh                        # emsdk 6.0.0 + Surge at the pinned SHA + vendor patches
+./build.sh                        # engine  -> src/js/surge-engine.{js,wasm} + worklet bundle
+./build_gui.sh                    # the GUI -> src/js/surge-gui.{js,wasm}   (incremental)
 ./tools/stage_data.sh             # ~469 MB of patches/wavetables into src/data/
-uv run tools/gen_patch_index.py   # src/data/patches.json
+uv run tools/pack_data.py         # surge-data.{bin,json} + surge-remote.json
+node .frenzy/build_themes.mjs     # src/js/themes.js from the skin definitions
 ./run_server.sh                   # serve src/ over HTTPS; prints localhost + LAN URL
 ```
+
+`build_gui.sh` is incremental — it skips any object newer than its source, so a
+one-file change is one translation unit plus the link, not 75.
 
 Verification (never skip these — a compile is not evidence of sound):
 
 ```sh
 node tools/verify_audio.mjs       # renders 2s headlessly, measures pitch/envelope
 node tools/browser_test.mjs       # real Chrome: engine, GUI, patches, keyboard
+node tools/skin_shots.mjs         # screenshots every skin + reports COMPUTED style
+node .frenzy/input_test.mjs       # the three input modes, shortcuts, legend
+node .frenzy/lazy_test.mjs        # 3559 patches listed, on-demand patch loads
+node .frenzy/live_test.mjs        # the same, against the DEPLOYED site
 ```
+
+`skin_shots.mjs` reports computed style rather than class attributes on purpose:
+Tailwind's browser build ignores a class it cannot parse **without any error**,
+so a skin can be perfect in the file and render as nothing.
 
 | Path | What |
 | --- | --- |
 | `src/` | The static website. This is the deliverable. |
-| `src/data/` | Surge resources (patches, wavetables, impulses). **gitignored** — ~480 MB, regenerate with `tools/stage_data.sh`. |
+| `index.html` (repo root) | Redirect to `src/`. Pages publishes the repo ROOT from a branch and can only serve the root or `/docs`, so the site needs a door there. |
+| `docs/screenshot.png` | The README image. |
+| `src/data/surge-data.{bin,json}` | The startup archive: factory patches + wavetables, 29 MiB. **Committed.** |
+| `src/data/surge-remote.json` | Paths of the 2920 on-demand patches, 152 KiB. **Committed.** |
+| `src/data/patches_3rdparty/` | The on-demand bank, 241 MB of loose `.fxp`. **Committed** — see §5. |
+| `src/data/` (everything else) | Staged resources. **gitignored** — regenerate with `tools/stage_data.sh`. |
 | `src/skin/` | The 142 classic-skin SVGs. |
-| `src/js/surge-engine.{js,wasm}` | Our Emscripten build output. **gitignored** — regenerate with `build.sh`. |
+| `src/js/input/` | The note-input modes, shortcut table and legend. See §13. |
+| `src/js/themes.js` | **Generated.** The ten skins. See §12. |
+| `src/vendor/` | Pinned third-party browser libraries: Tailwind 4.3.3 (275 KB), abcjs 6.4.4 (472 KB). Vendored, not hot-linked, so the dump works offline. |
+| `src/js/surge-{engine,gui}.{js,wasm}` | Our Emscripten build output. **Committed** — Pages serves them directly. |
 | `vendor/surge/` | Upstream Surge clone at the pinned SHA. **gitignored** — `setup.sh` clones it. |
 | `emsdk/` | Emscripten 6.0.0. **gitignored** — `setup.sh` installs it. |
 | `tools/` | Build-time generators (layout extraction, patch indexing, data staging). |
@@ -155,10 +183,29 @@ outside the dump. The one deliberate exception permitted by the root CLAUDE.md
 | `impulses_factory` / `_3rdparty` | 19 MB / 17 MB | reverb IRs |
 | `fx_presets`, `modulator_presets`, `tuning_library` | 1.3 / 0.44 / 2.3 MB | — |
 
-**Decision (user, 2026-08-07):** ship *everything* — factory **and** 3rd-party.
-Total ≈ 480 MB. Runtime cost stays low because patches are lazy-loaded
-individually; only the index is fetched up front. Repo cost is avoided by
-gitignoring `src/data/` and regenerating from the pinned SHA.
+**Decision (user, 2026-08-07, restated 2026-08-08):** ship *everything* —
+factory **and** 3rd-party. "ALSO WHY ONLY FACTORY PATCHES :( i want ALL the
+patches."
+
+**How that is actually delivered — two tiers, and the reason matters:**
+
+| Tier | Contents | Arrives |
+| --- | --- | --- |
+| Startup archive | 639 factory patches + 203 wavetables, 29 MiB | one fetch, before the synth exists |
+| On demand | 2920 3rd-party patches, 241 MB as loose files | when the user picks one |
+
+The split is forced by `SurgeStorage`, which scans a directory **in its
+constructor** to build its patch list. Anything Surge's own browser and jog
+buttons must see has to be on the filesystem before the synth is constructed —
+so the factory bank cannot be lazy. But all 3559 in one archive would be a
+271 MB download before the first note, which is not a usable page.
+
+The sidebar lists all 3559 either way. Only the bytes are deferred. A remote
+patch is written into **both** wasm filesystems before either Surge is asked for
+it, since the engine loads by path exactly as the GUI does.
+
+`wavetables_3rdparty` (165 MB) is still excluded. Nothing in the shipped patch
+set references it; if that changes it joins the on-demand tier.
 
 ## 6. Known technical risks
 
@@ -214,10 +261,34 @@ at piano-correct positions (i.e. a gap where E–F and B–C have no black key).
 - `1234567890-=` → the corresponding sharps, gapped like a piano
 
 Requirements: ignore key auto-repeat, note-off on keyup, octave shift, velocity
-control, and no stuck notes when the window loses focus.
+control, and no stuck notes when the window loses focus. All met, in
+`src/js/keyboard.js`.
 
 **Assumption flagged:** "major notes" is read as *naturals/white keys*. If it
 meant "notes of a specific major scale", only the mapping table changes.
+
+### The shortcut space is nearly full
+
+Worth stating because it constrains every future binding. The note layout claims
+all four letter rows, the digits `1234567890-=`, AND the arrow keys (octave and
+velocity). What is left:
+
+- `PageUp` / `PageDown`, `Escape`, `F1`, `?`
+- anything with **ctrl**, **meta** or **alt** — free by construction, because
+  `keyboard.js` returns immediately when one is held
+
+Current bindings live in `src/js/input/bindings.js` and are the single source
+for both the dispatcher and the legend:
+
+| Chord | Action |
+| --- | --- |
+| `PageDown` / `PageUp` | next / previous patch |
+| `shift` + those | next / previous category |
+| `Ctrl+R` | random patch |
+| `Escape` | close what is open, else panic (all notes off) |
+| `Ctrl+1/2/3` | keyboard / piano roll / notation |
+| `?` or `F1` | the legend |
+| `Space` | play-stop, contributed by whichever mode is mounted |
 
 ## 9. Development philosophy
 
@@ -234,13 +305,102 @@ Inherited from the global CLAUDE.md; the load-bearing ones here:
 
 ## 10. Backburner
 
-- MIDI file playback / step sequencer.
+- **Timestamped event queue in the worklet.** The blocker for real sequencing.
+  Note events currently carry no time and are played on arrival, so the piano
+  roll and the notation editor are audibly loose. Fix: messages carry a target
+  frame; `process()` drains what is due in the coming 128 samples. Block-
+  quantised (2.7 ms) first — sample-accurate only if that proves audible.
+- Web MIDI input. Cheap: `app.io.noteOn/noteOff` is already the single seam and
+  live notes need no scheduling.
+- Pitch bend, mod wheel and macro knobs — see §15.
 - Preset save back to disk (browser download).
 - `SharedArrayBuffer` + threaded build if single-threaded DSP proves too slow.
-- Alternate skins (`dark-mode.surge-skin` is already in the upstream tree).
+  Blocked on Pages: branch-published sites cannot set COOP/COEP headers.
 - Microtuning UI (Surge's tuning library ships in the data set).
 
 ## 11. Status
 
+Deployed and working at **https://ryanndagreat.github.io/WebSurge/**.
+
+Engine, real GUI, 3559 patches, 203 wavetables, 10 skins, 3 input modes.
 See `.claude_todo.md` for the live task list and `concerns.md` for history.
+
+## 12. Deployment
+
+Live at **https://ryanndagreat.github.io/WebSurge/**, published by GitHub Pages
+from the `master` branch, repo ROOT.
+
+Two consequences worth knowing before changing anything here:
+
+- **The root must have an `index.html`.** Branch-published Pages serves only the
+  repo root or `/docs`, and the site lives in `src/`. The root `index.html` is a
+  redirect. A copy would be two files to keep in step; they would diverge.
+- **No custom headers.** This rules out COOP/COEP, and therefore
+  `SharedArrayBuffer`, and therefore the threaded build and unifying the two
+  Surge instances. It is the reason that item is on the backburner rather than
+  in progress.
+
+A GitHub Actions workflow was added and then deleted: the repo already had a
+branch build configured, and two publishers racing for the same site is worse
+than either alone.
+
+## 13. Skins
+
+Ten of them, in `src/js/themes.js`, which is **generated** — edit
+`.frenzy/skin_*.js` and re-run `node .frenzy/build_themes.mjs`.
+
+A skin is not a palette. Each is a table of 31 Tailwind class strings, one per
+REGION of the page chrome, and applying it rewrites that region's `class`
+attribute outright. That is why skins differ in **layout** — Brutalist and Paper
+put the sidebar on the right — and not only in hue. There is no stylesheet to
+override because there is no stylesheet: `src/css/surge.css` was deleted,
+398 lines to 0.
+
+    class = MARKERS[region] + BASE[region] + skin.classes[region] + sticky
+
+`BASE` is layout plumbing a skin must not break. `MARKERS` are the class names
+other modules query by (`patches.js` finds rows with `.patch`), so dressing an
+element cannot break the code that finds it. `sticky` is runtime state
+(`selected`, `held`, `indeterminate`) re-applied last, which skins style through
+the arbitrary variant `[&.selected]:…`.
+
+**Do not remove `@import "tailwindcss"` from index.html.** It looks redundant —
+the browser build contains Tailwind — but without it the runtime emits no base
+and no utilities, and every skin falls back to Times New Roman on transparent.
+Measured, 2026-08-08. Its cost is one 404 for `/tailwindcss` per page load
+before the runtime falls back to its bundled copy; that request is root-relative
+so a project Pages site cannot satisfy it. Noise, not breakage.
+
+## 14. Input modes
+
+`src/js/input/`. One mounted at a time, chosen from the toolbar or `Ctrl+1/2/3`.
+
+A mode is `{id, label, hint, async mount(container, io) -> {destroy, shortcuts?}}`.
+`io` — `{noteOn, noteOff, allNotesOff, setModeStatus}` — is the **only** channel
+a mode has to make sound. Modes never touch the synth, the worklet or the piano.
+Adding one requires no change anywhere else.
+
+**Teardown is enforced**: `mount` must return a `destroy()` or the registry
+throws. Not ceremony — `attachKeyboard()` had always returned a `destroy()` that
+the app discarded, and `createPiano()` leaked a `window` blur listener. Either
+would mean two input sources firing after a switch, notes stuck on, no error.
+
+`mount` is async so a mode can `import()` a heavy dependency on first use rather
+than at page load; the notation mode pulls in 472 KB of abcjs that way.
+
+Both the roll and the notation editor are **not sequencers** and must not be
+described as such — see the Backburner entry above.
+
+## 15. Macros and MIDI controllers (not yet wired)
+
+Surge already has per-patch assignable knobs: **8 Macros**, renamed by each
+patch (a loaded patch shows "How Messy?", "Ring Mod" and so on), plus Pitch
+Bend, Mod Wheel, Channel/Poly Aftertouch, Breath, Expression, Sustain, Timbre,
+Velocity, Keytrack and the LFOs. They are all visible in the modulation row of
+the panel, and because mouse events are forwarded to Surge's real editor they
+are **already draggable today**.
+
+What is missing is only the chrome and the plumbing:
+`surge-worklet.js` already handles `pitchBend` and `cc` message types — nothing
+has ever sent them.
 Current phase: **scaffolding + toolchain**. No engine built yet.
