@@ -512,9 +512,23 @@ void pumpMessages()
 {
     // JUCE_MODAL_LOOPS_PERMITTED is off, so runDispatchLoopUntil is unavailable,
     // and it would be wrong anyway -- a browser must never block. Instead drain
-    // the FIFO defined in juce_Messaging_wasm.cpp, which is what makes timers
-    // (meters, LFO displays, value readouts) and async repaints actually run.
+    // the FIFO defined in juce_Messaging_wasm.cpp.
     juce::pumpWasmMessageQueue();
+
+    /*
+     * Tick JUCE's timers.
+     *
+     * This is separate from the message queue and easy to miss: JUCE normally
+     * runs timers off a dedicated thread that posts into a native run loop, and
+     * we have neither. Surge drives its ENTIRE editor from one
+     * (SurgeSynthEditor.cpp:285 starts a 60 Hz timer calling sge->idle()), so
+     * without this the interface renders once and then never updates anything
+     * idle-driven -- the patch name after a jog, VU meters, value readouts.
+     *
+     * The symptom is subtle rather than obvious: the GUI looks fine and responds
+     * to clicks, it just quietly fails to refresh things it did not draw itself.
+     */
+    juce::Timer::callPendingTimersSynchronously();
 }
 
 bool renderIfDirty()

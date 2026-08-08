@@ -25,6 +25,40 @@
 /** Render quantum fixed by the Web Audio spec. Surge's internal block is 32, which divides it evenly. */
 const QUANTUM = 128;
 
+/**
+ * Command. Writes the packed resource archive into the engine's filesystem.
+ *
+ * Duplicated from surge-data.js on purpose: the worklet bundle is a concatenated
+ * classic script with no module loader, so it cannot import. Kept deliberately
+ * small for that reason -- see surge-data.js for the full rationale.
+ *
+ * @param {object} FS - the Emscripten filesystem
+ * @param {Array<{p: string, o: number, n: number}>} files
+ * @param {Uint8Array} bytes
+ * @param {string} root - mount point
+ */
+function mountSurgeData(FS, files, bytes, root) {
+  const mk = (path) => {
+    try { FS.mkdir(path); } catch (err) { if (err && err.code !== 'EEXIST') throw err; }
+  };
+  mk(root);
+
+  const dirs = new Set();
+  for (const f of files) {
+    const parts = f.p.split('/');
+    parts.pop();
+    let acc = '';
+    for (const part of parts) { acc = acc ? `${acc}/${part}` : part; dirs.add(acc); }
+  }
+  // Parents before children: MEMFS has no mkdir -p.
+  for (const d of [...dirs].sort((a, b) => a.split('/').length - b.split('/').length)) {
+    mk(`${root}/${d}`);
+  }
+
+  const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  for (const f of files) FS.writeFile(`${root}/${f.p}`, data.subarray(f.o, f.o + f.n));
+}
+
 class SurgeProcessor extends AudioWorkletProcessor {
   constructor(options) {
     super();
@@ -41,7 +75,8 @@ class SurgeProcessor extends AudioWorkletProcessor {
 
     this.port.onmessage = (e) => this.onMessage(e.data);
 
-    const { wasmBinary, sampleRate: sr, dataPath } = options.processorOptions;
+    const { wasmBinary, sampleRate: sr, dataPath, surgeData } = options.processorOptions;
+    this.surgeData = surgeData;
     if (!wasmBinary) throw new Error('surge-worklet: wasmBinary was not supplied');
 
     // createSurgeEngine comes from the glue concatenated ahead of this file.
@@ -83,6 +118,14 @@ class SurgeProcessor extends AudioWorkletProcessor {
       metadata: c('sh_metadata_json', 'string', []),
       loadPatchPath: c('sh_load_patch_path', 'number', ['string', 'string']),
     };
+
+    // Mount the resource tree BEFORE sh_init: SurgeStorage scans for wavetables
+    // in its constructor, and the engine is what actually reads one when a patch
+    // asks for it. Without this, wavetable patches load but sound wrong.
+    if (this.surgeData) {
+      mountSurgeData(M.FS, this.surgeData.files, this.surgeData.bytes, dataPath);
+      this.surgeData = null; // release the copy; it is ~29 MB
+    }
 
     if (!this.sh.init(sr, dataPath)) throw new Error('surge-worklet: sh_init failed');
 

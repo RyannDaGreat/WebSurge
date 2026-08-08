@@ -20,13 +20,15 @@
 
 import { attachKeyboard } from './keyboard.js';
 import { loadPatchIndex, buildPatchTree } from './patches.js';
+import { fetchSurgeData, unpackInto, SURGE_DATA_ROOT } from './surge-data.js';
+import { createPiano } from './piano.js';
 
 const GUI_MODULE = './surge-gui.js';
 const WORKLET_BUNDLE = 'js/surge-worklet-bundle.js';
 const ENGINE_WASM = 'js/surge-engine.wasm';
 
 /** Where Surge's resources are mounted inside each Emscripten filesystem. */
-const DATA_PATH = '/SurgeXTData';
+const DATA_PATH = SURGE_DATA_ROOT;
 
 const $ = (id) => document.getElementById(id);
 const setStatus = (m) => { $('status').textContent = m; };
@@ -89,7 +91,7 @@ class SurgeGuiApp {
 
     const c = (n, r, a) => M.cwrap(n, r, a);
     this.sg = {
-      init: c('sgui_init', 'number', []),
+      init: c('sgui_init', 'number', ['string']),
       width: c('sgui_width', 'number', []),
       height: c('sgui_height', 'number', []),
       render: c('sgui_render', 'number', []),
@@ -104,11 +106,30 @@ class SurgeGuiApp {
       loadPatch: c('sgui_load_patch_path', 'number', ['string', 'string']),
       setScale: c('sgui_set_scale', null, ['number']),
       getScale: c('sgui_get_scale', 'number', []),
+      patchCount: c('sgui_patch_count', 'number', []),
+      wtCount: c('sgui_wt_count', 'number', []),
       canvasWidth: c('sgui_canvas_width', 'number', []),
       canvasHeight: c('sgui_canvas_height', 'number', []),
     };
 
-    if (!this.sg.init()) throw new Error('sgui_init failed -- the editor was not created');
+    // Mount BEFORE init: SurgeStorage scans for patches in its constructor, so
+    // a tree that appears afterwards is invisible to Surge forever.
+    setStatus('mounting Surge resources...');
+    this.surgeData = await fetchSurgeData();
+    const mounted = unpackInto(M.FS, this.surgeData.files, this.surgeData.bytes);
+
+    if (!this.sg.init(SURGE_DATA_ROOT)) {
+      throw new Error('sgui_init failed -- the editor was not created');
+    }
+
+    // Surge's own view of its library, not ours. If this is zero the jog buttons
+    // and Surge's patch browser are dead no matter what the sidebar shows.
+    const found = this.sg.patchCount();
+    console.info(`mounted ${mounted} files; Surge found ${found} patches, ` +
+      `${this.sg.wtCount()} wavetables`);
+    if (found === 0) {
+      fail('Surge found no patches after mounting -- its browser and jog buttons will not work');
+    }
 
     this.canvas = $('surge-canvas');
     this.ctx2d = this.canvas.getContext('2d', { alpha: false });
@@ -287,7 +308,14 @@ class SurgeGuiApp {
       numberOfInputs: 0,
       numberOfOutputs: 1,
       outputChannelCount: [2],
-      processorOptions: { wasmBinary, sampleRate: this.audioCtx.sampleRate, dataPath: DATA_PATH },
+      processorOptions: {
+        wasmBinary,
+        sampleRate: this.audioCtx.sampleRate,
+        dataPath: DATA_PATH,
+        // The engine needs the same tree: it is what actually reads a wavetable
+        // when a patch asks for one.
+        surgeData: { files: this.surgeData.files, bytes: this.surgeData.bytes },
+      },
     });
     this.node.onprocessorerror = (e) => fail('Audio processor crashed', e);
     this.node.port.onmessage = (e) => {
@@ -299,17 +327,38 @@ class SurgeGuiApp {
     window.__surgeGui = this;
   }
 
-  /** Command. Wires the computer keyboard to note input. */
+  /**
+   * Command. Wires note input: computer keyboard and the on-screen piano.
+   *
+   * Both go through noteOn/noteOff below rather than talking to the worklet
+   * directly, so the piano lights up for either source and there is exactly one
+   * place where a note becomes sound.
+   */
   attachKeys() {
+    this.piano = createPiano($('piano'), {
+      onNoteOn: (note, velocity) => this.noteOn(note, velocity),
+      onNoteOff: (note) => this.noteOff(note),
+    });
+
     attachKeyboard({
-      onNoteOn: (note, velocity) =>
-        this.node?.port.postMessage({ type: 'noteOn', channel: 0, key: note, velocity }),
-      onNoteOff: (note) =>
-        this.node?.port.postMessage({ type: 'noteOff', channel: 0, key: note, velocity: 0 }),
+      onNoteOn: (note, velocity) => this.noteOn(note, velocity),
+      onNoteOff: (note) => this.noteOff(note),
       onStateChange: ({ octave, velocity }) => {
         $('kb-state').textContent = `octave ${octave >= 0 ? '+' : ''}${octave} · vel ${velocity}`;
       },
     });
+  }
+
+  /** Command. Sounds a note and lights its key. */
+  noteOn(note, velocity) {
+    this.node?.port.postMessage({ type: 'noteOn', channel: 0, key: note, velocity });
+    this.piano?.setHeld(note, true);
+  }
+
+  /** Command. Releases a note and unlights its key. */
+  noteOff(note) {
+    this.node?.port.postMessage({ type: 'noteOff', channel: 0, key: note, velocity: 0 });
+    this.piano?.setHeld(note, false);
   }
 
   /** Command. Loads a patch into BOTH instances so picture and sound agree. */
@@ -371,8 +420,10 @@ async function main() {
     catch (err) { fail('Could not change HiDPI setting', err); }
   });
 
-  $('panic-btn').addEventListener('click', () =>
-    app.node?.port.postMessage({ type: 'allNotesOff' }));
+  $('panic-btn').addEventListener('click', () => {
+    app.node?.port.postMessage({ type: 'allNotesOff' });
+    app.piano?.clear();
+  });
 }
 
 main();

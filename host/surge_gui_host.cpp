@@ -25,6 +25,7 @@
 #include <emscripten/emscripten.h>
 
 #include <cmath>
+#include <cstdlib>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -67,10 +68,24 @@ extern "C"
      * Returns 1 on success, 0 if already initialised or the editor was refused.
      */
     EMSCRIPTEN_KEEPALIVE
-    int sgui_init()
+    int sgui_init (const char *dataPath)
     {
         if (gEditor)
             return 0;
+
+        /*
+         * Point Surge at the mounted resource tree BEFORE the synth exists.
+         *
+         * SurgeStorage scans for patches and wavetables in its own constructor,
+         * so setting this afterwards would be too late -- the lists would stay
+         * empty and the patch browser and jog buttons would do nothing.
+         *
+         * SurgeSynthProcessor takes no data-path argument, but SurgeStorage
+         * honours SURGE_DATA_HOME (SurgeStorage.cpp:1950), which is the only
+         * hook available without patching Surge.
+         */
+        if (dataPath != nullptr && *dataPath != '\0')
+            setenv ("SURGE_DATA_HOME", dataPath, 1);
 
         gRuntime = std::make_unique<JuceRuntime>();
         gProcessor = std::make_unique<SurgeSynthProcessor>();
@@ -93,6 +108,27 @@ extern "C"
         surgewasm::invalidateAll();
 
         return 1;
+    }
+
+    /*
+     * Query. How many patches Surge itself found by scanning its data path.
+     *
+     * This is the honest test of whether the resource tree is mounted. Zero here
+     * means the Category/Patch jog buttons will do nothing and Surge's own patch
+     * browser will be empty, however well the sidebar works -- the sidebar is a
+     * separate JS index and proves nothing about what Surge knows.
+     */
+    EMSCRIPTEN_KEEPALIVE
+    int sgui_patch_count()
+    {
+        return gProcessor ? (int) gProcessor->surge->storage.patch_list.size() : 0;
+    }
+
+    /* Query. How many wavetables Surge found. Same reasoning as above. */
+    EMSCRIPTEN_KEEPALIVE
+    int sgui_wt_count()
+    {
+        return gProcessor ? (int) gProcessor->surge->storage.wt_list.size() : 0;
     }
 
     /* Query. Editor width in LOGICAL pixels, as Surge itself sized it. */
@@ -134,6 +170,20 @@ extern "C"
             return 0;
 
         surgewasm::pumpMessages();
+
+        /*
+         * Execute anything the UI queued for the audio thread -- above all, patch
+         * loads.
+         *
+         * jogPatch() and the patch browser do not load a patch; they set
+         * patchid_queue and expect process() to pick it up. This instance never
+         * calls process() (the engine in the worklet does the audio), so without
+         * this pump the Category/Patch jog buttons visibly depress and then
+         * nothing happens. Surge provides this exact entry point for hosts where
+         * the audio thread is not running.
+         */
+        if (gProcessor)
+            gProcessor->surge->processAudioThreadOpsWhenAudioEngineUnavailable();
 
         const bool painted = surgewasm::renderAllDirty();
 
