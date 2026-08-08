@@ -43,7 +43,7 @@ const SELECTORS = {
   chip: '#kb-state, #scale-info',
   chipWarn: '#unplaced',
   ctl: '#toolbar label.ctl',
-  select: '#zoom-select, #theme-select',
+  select: '#zoom-select, #theme-select, #mode-select',
   checkbox: '#retina-toggle',
   button: '#panic-btn',
   errorBar: '#error-bar',
@@ -62,8 +62,10 @@ const SELECTORS = {
   piano: '#piano',
   keyWhite: '#piano .key.white',
   keyBlack: '#piano .key.black',
-  overlay: '#overlay',
-  overlayBox: '#overlay-box',
+  // The shortcut legend is dressed as an overlay too, so it inherits each
+  // skin's veil, panel and type without any skin knowing it exists.
+  overlay: '#overlay, #shortcut-key',
+  overlayBox: '#overlay-box, #shortcut-key-box',
   startBtn: '#start-btn',
 };
 
@@ -109,7 +111,9 @@ const BASE = {
   keyWhite: "absolute top-0 h-full box-border after:pointer-events-none after:absolute after:inset-x-0 after:bottom-0.5 after:text-center after:text-[8px] after:content-[attr(data-label)]",
   keyBlack: 'absolute top-0 h-[62%] box-border z-20',
   overlay: 'fixed inset-0 z-50 flex items-center justify-center [&[hidden]]:hidden',
-  overlayBox: 'text-center max-w-md',
+  // max-w-md and centring suit the start gate. The legend sets its own width
+  // and alignment, so BASE only carries what both need.
+  overlayBox: 'max-w-[min(56rem,92vw)]',
   startBtn: 'cursor-pointer disabled:opacity-45',
 };
 

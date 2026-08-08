@@ -21,6 +21,13 @@
 import { attachKeyboard } from './keyboard.js';
 import { buildPatchIndex, buildPatchTree } from './patches.js';
 import { initThemePicker, dressGenerated } from './themes.js';
+import { createModeRegistry } from './input/registry.js';
+import { keyboardMode } from './input/mode-keyboard.js';
+import { pianoRollMode } from './input/mode-pianoroll.js';
+import { notationMode } from './input/mode-notation.js';
+import { attachShortcuts } from './input/shortcuts.js';
+import { BINDINGS } from './input/bindings.js';
+import { createShortcutKey } from './input/shortcut-key.js';
 import {
   fetchSurgeData, fetchRemoteIndex, fetchRemotePatch,
   unpackInto, writeFileInto, SURGE_DATA_ROOT,
@@ -373,7 +380,7 @@ class SurgeGuiApp {
    * directly, so the piano lights up for either source and there is exactly one
    * place where a note becomes sound.
    */
-  attachKeys() {
+  async attachKeys() {
     this.piano = createPiano($('piano'), {
       onNoteOn: (note, velocity) => this.noteOn(note, velocity),
       onNoteOff: (note) => this.noteOff(note),
@@ -382,13 +389,152 @@ class SurgeGuiApp {
     // 128 keys that did not exist when the skin was applied.
     dressGenerated();
 
-    attachKeyboard({
-      onNoteOn: (note, velocity) => this.noteOn(note, velocity),
-      onNoteOff: (note) => this.noteOff(note),
-      onStateChange: ({ octave, velocity }) => {
-        $('kb-state').textContent = `octave ${octave >= 0 ? '+' : ''}${octave} · vel ${velocity}`;
-      },
-    });
+    // The only channel an input mode has to make sound. Modes never reach the
+    // worklet, the synth or the piano directly, which is what lets a new one be
+    // added without touching anything here.
+    this.io = {
+      noteOn: (note, velocity) => this.noteOn(note, velocity),
+      noteOff: (note) => this.noteOff(note),
+      allNotesOff: () => this.panic(),
+      setModeStatus: (text) => { $('kb-state').textContent = text; },
+    };
+
+    this.modes = createModeRegistry(
+      [keyboardMode, pianoRollMode, notationMode], this.io, $('mode-panel'));
+
+    const picker = $('mode-select');
+    for (const mode of this.modes.modes()) {
+      const option = document.createElement('option');
+      option.value = mode.id;
+      option.textContent = mode.label;
+      picker.append(option);
+    }
+    picker.addEventListener('change', () => this.setInputMode(picker.value));
+
+    this.shortcutKey = createShortcutKey(BINDINGS);
+    this.shortcuts = attachShortcuts(BINDINGS, this);
+
+    await this.setInputMode(keyboardMode.id);
+  }
+
+  /**
+   * Command. Switches note-input mode, tearing the previous one down.
+   *
+   * @param {string} id - 'keyboard' | 'pianoroll' | 'notation'
+   */
+  async setInputMode(id) {
+    try {
+      await this.modes.activate(id);
+      $('mode-select').value = id;
+      dressGenerated();
+    } catch (err) {
+      fail(`Could not switch to input mode "${id}"`, err);
+    }
+  }
+
+  /** Command. Shows or hides the keyboard legend. */
+  toggleShortcutKey() {
+    this.shortcutKey.toggle();
+  }
+
+  /**
+   * Command. What Escape does, which depends on what is on screen.
+   *
+   * Dismissing the thing in front of you is what Escape means everywhere else,
+   * so the legend takes priority. Panic is what is left when nothing is open --
+   * and panic while a modal is up is not what anyone pressing Escape wanted.
+   */
+  escape() {
+    if (this.shortcutKey?.isOpen()) {
+      this.shortcutKey.close();
+      return;
+    }
+    this.panic();
+  }
+
+  /** Command. Silences everything sounding, whatever started it. */
+  panic() {
+    this.node?.port.postMessage({ type: 'allNotesOff' });
+    this.piano?.clear();
+  }
+
+  /**
+   * Command. Loads the patch `delta` places from the current one.
+   *
+   * Steps the flat sorted index rather than the DOM, so it is unaffected by
+   * which categories happen to be expanded or filtered. Wraps at both ends --
+   * there is no useful "you are at the end" state for 3559 patches.
+   *
+   * @param {number} delta - +1 for next, -1 for previous
+   */
+  stepPatch(delta) {
+    const list = this.patchIndex?.patches;
+    if (!list || list.length === 0) return;
+
+    const at = this.patchAt === undefined ? -1 : this.patchAt;
+    this.selectPatchAt((at + delta + list.length) % list.length);
+  }
+
+  /**
+   * Command. Loads the first patch of the category `delta` places away.
+   *
+   * @param {number} delta - +1 for next, -1 for previous
+   */
+  stepCategory(delta) {
+    const list = this.patchIndex?.patches;
+    if (!list || list.length === 0) return;
+
+    const here = list[this.patchAt ?? 0];
+    const key = (p) => `${p.bank}/${p.category}`;
+
+    // Walk until the category changes, then keep walking backwards to the
+    // FIRST patch of it -- stepping back one should land at the top of the
+    // previous category, not its last entry.
+    let i = this.patchAt ?? 0;
+    for (let n = 0; n < list.length; n++) {
+      i = (i + delta + list.length) % list.length;
+      if (key(list[i]) !== key(here)) break;
+    }
+    while (key(list[(i - 1 + list.length) % list.length]) === key(list[i]) && i > 0) i--;
+
+    this.selectPatchAt(i);
+  }
+
+  /** Command. Loads a patch at random. */
+  randomPatch() {
+    const list = this.patchIndex?.patches;
+    if (!list || list.length === 0) return;
+    this.selectPatchAt(Math.floor(Math.random() * list.length));
+  }
+
+  /**
+   * Command. Loads the patch at `index` and moves the sidebar selection to it.
+   *
+   * The sidebar row is found by path rather than position because the tree is
+   * nested and its DOM order, while matching, is not something to depend on.
+   *
+   * @param {number} index - into this.patchIndex.patches
+   */
+  selectPatchAt(index) {
+    const entry = this.patchIndex.patches[index];
+    this.patchAt = index;
+
+    const list = $('patch-list');
+    list.querySelector('.patch.selected')?.classList.remove('selected');
+
+    const rows = [...list.querySelectorAll('.patch')];
+    const row = rows[index];
+    if (row) {
+      row.classList.add('selected');
+      // Open the ancestors, or a jog into a collapsed category selects a row
+      // nobody can see.
+      for (let el = row.parentElement; el; el = el.parentElement) {
+        if (el.tagName === 'DETAILS') el.open = true;
+      }
+      row.scrollIntoView({ block: 'nearest' });
+    }
+
+    this.loadPatch(entry);
   }
 
   /** Command. Sounds a note and lights its key. */
@@ -412,6 +558,12 @@ class SurgeGuiApp {
    * and let Surge's own loader read it.
    */
   async loadPatch(entry) {
+    // Keep the jog position in step with sidebar clicks, so PageDown after a
+    // click continues from what was clicked rather than from wherever the last
+    // jog left off.
+    const at = this.patchIndex?.patches.indexOf(entry);
+    if (at !== undefined && at >= 0) this.patchAt = at;
+
     setStatus(`loading ${entry.name}...`);
     try {
       // A remote patch has to exist in BOTH filesystems before either Surge is
@@ -467,7 +619,7 @@ async function main() {
     try {
       await app.startGui();
       await app.startAudio();
-      app.attachKeys();
+      await app.attachKeys();
       $('overlay').hidden = true;
       setStatus(`ready -- ${app.paramCount} parameters`);
     } catch (err) {
@@ -486,10 +638,7 @@ async function main() {
     catch (err) { fail('Could not change HiDPI setting', err); }
   });
 
-  $('panic-btn').addEventListener('click', () => {
-    app.node?.port.postMessage({ type: 'allNotesOff' });
-    app.piano?.clear();
-  });
+  $('panic-btn').addEventListener('click', () => app.panic());
 }
 
 main();

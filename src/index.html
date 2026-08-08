@@ -81,6 +81,10 @@
   <label class="ctl" title="Render at the display's real pixel density">
     <input type="checkbox" id="retina-toggle" checked> HiDPI
   </label>
+  <label class="ctl" title="How notes get into Surge. Ctrl+1/2/3">
+    Input
+    <select id="mode-select"></select>
+  </label>
   <label class="ctl" title="Skins are Tailwind class sets, not just palettes">
     Skin
     <select id="theme-select"></select>
@@ -116,18 +120,37 @@
         <a href="https://github.com/RyannDaGreat/WebSurge">github.com/RyannDaGreat/WebSurge</a>.
       </p>
 
+      <!-- The keyboard layout used to be spelled out here and had already gone
+           stale. It now lives in the legend, which is generated from the same
+           table the dispatcher runs, so it cannot drift again. -->
       <p id="help">
-        Play with <kbd>z</kbd><kbd>x</kbd><kbd>c</kbd>…<kbd>/</kbd> and
-        <kbd>q</kbd><kbd>w</kbd><kbd>e</kbd>…<kbd>\</kbd> (white keys);
-        the row above each plays the sharps.
-        <kbd>←</kbd><kbd>→</kbd> shift octave, <kbd>↑</kbd><kbd>↓</kbd> change velocity.
-        The panel itself is Surge's real interface — click and drag it as you would the plugin.
+        The panel is Surge's real interface — click and drag it as you would the
+        plugin. Press <kbd>?</kbd> for the keyboard.
       </p>
     </footer>
   </section>
 </main>
 
+<!-- Where the active input mode builds its UI. The computer-keyboard mode puts
+     nothing here (its interface is the keyboard); the piano roll and the
+     notation editor fill it. -->
+<!-- Classes inline rather than in a skin region: all ten skins would have to
+     define one, and this needs nothing skin-specific. `border-current` and
+     `bg-current/5` take their colour from whatever the skin set on body, so it
+     sits correctly on Frosted Glass and on Paper & Ink alike. Empty when the
+     computer-keyboard mode is active, and :empty collapses it to nothing. -->
+<div id="mode-panel"
+     class="shrink-0 max-h-[45vh] overflow-auto border-t border-current/15 bg-current/5 empty:hidden"></div>
+
 <div id="piano" title="All 128 MIDI notes. Click or drag to play."></div>
+
+<!-- The keyboard legend. Empty here on purpose: its contents are generated from
+     the binding table in js/input/bindings.js and the row constants in
+     js/keyboard.js, so nothing about a shortcut is written down twice. Only the
+     shell is markup, so the skin system can dress it like the start overlay. -->
+<div id="shortcut-key" hidden>
+  <div id="shortcut-key-box"></div>
+</div>
 
 <div id="overlay">
   <div id="overlay-box">

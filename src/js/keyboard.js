@@ -36,6 +36,20 @@ const LOWER_ROW_BASE = 48;
 const UPPER_ROW_BASE = 60;
 
 /**
+ * The layout as something that can be displayed, for the keyboard legend.
+ *
+ * Exported so the legend renders the rows this file actually binds rather than a
+ * second hand-written copy of them. The old inline help text in index.html was
+ * exactly that second copy, and it had drifted.
+ */
+export const NOTE_ROWS = [
+  { label: 'White keys', keys: LOWER_NATURALS },
+  { label: 'Sharps', keys: LOWER_SHARPS },
+  { label: 'White keys, +1 octave', keys: UPPER_NATURALS },
+  { label: 'Sharps, +1 octave', keys: UPPER_SHARPS },
+];
+
+/**
  * Pure function. Builds the key -> MIDI note map for one pair of rows.
  *
  * Naturals are laid out diatonically from `base`. Each natural that has a black

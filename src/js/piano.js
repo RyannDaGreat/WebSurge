@@ -169,6 +169,19 @@ export function createPiano(container, { onNoteOn, onNoteOff }) {
   window.addEventListener('blur', release);
 
   return {
+    /**
+     * Command. Stops listening and releases anything held.
+     *
+     * The window-level blur listener is the reason this has to exist: it
+     * outlives the container, so a piano that is replaced without being
+     * destroyed keeps a reference to the old callbacks forever.
+     */
+    destroy() {
+      release();
+      window.removeEventListener('blur', release);
+      container.textContent = '';
+    },
+
     /** Command. Lights or unlights a key. Ignores notes outside 0..127. */
     setHeld(note, on) {
       els.get(note)?.classList.toggle('held', on);
