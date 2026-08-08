@@ -86,7 +86,12 @@ const BASE = {
   body: 'm-0 h-screen flex flex-col overflow-hidden',
   toolbar: 'flex items-center gap-3 shrink-0',
   brand: 'm-0',
-  status: 'flex-1 min-w-0 truncate',
+  // min-w-40, not min-w-0. With min-w-0 the status is the only flexible item in
+  // the toolbar, so it absorbs every overflow and collapses to zero -- the
+  // status read "r.." on the two skins with the largest type. A floor makes it
+  // refuse, which forces a wrapping toolbar to wrap and a fixed one to clip
+  // something less important instead.
+  status: 'flex-1 min-w-40 truncate',
   progress: "relative overflow-hidden shrink-0 [&[hidden]]:hidden after:content-[''] after:absolute after:inset-0 after:origin-left after:scale-x-[var(--progress,0)] after:transition-transform [&.indeterminate]:after:scale-x-100 [&.indeterminate]:after:w-2/5 [&.indeterminate]:after:animate-sweep",
   chip: 'shrink-0 whitespace-nowrap',
   chipWarn: 'shrink-0 whitespace-nowrap',
@@ -375,7 +380,7 @@ export const THEMES = {
     classes: {
       html: "font-sans scheme-light",
       body: "bg-white text-neutral-900",
-      toolbar: "h-20 px-10 gap-6 bg-white border-b border-neutral-200 rounded-none m-0 shadow-none",
+      toolbar: "h-20 px-6 gap-4 bg-white border-b border-neutral-200 rounded-none m-0 shadow-none",
       brand: "text-2xl font-bold tracking-tight text-neutral-900",
       status: "text-xs font-normal text-neutral-600 tabular-nums",
       progress: "w-40 h-0.5 rounded-none bg-neutral-200 after:bg-red-600 after:rounded-none",
@@ -413,7 +418,7 @@ export const THEMES = {
     classes: {
       html: "font-sans scheme-dark",
       body: "bg-black text-white text-base leading-relaxed",
-      toolbar: "h-16 px-4 py-2 m-0 bg-black rounded-none border-0 border-b-4 border-solid border-white",
+      toolbar: "min-h-16 h-auto flex-wrap px-3 py-2 gap-2 m-0 bg-black rounded-none border-0 border-b-4 border-solid border-white",
       brand: "text-2xl font-extrabold tracking-tight text-yellow-300",
       status: "text-base font-semibold text-white",
       progress: "w-44 h-4 rounded-none bg-black border-2 border-white after:bg-yellow-300",

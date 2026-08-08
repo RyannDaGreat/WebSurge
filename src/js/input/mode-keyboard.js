@@ -15,7 +15,7 @@ import { attachKeyboard } from '../keyboard.js';
 
 export const keyboardMode = {
   id: 'keyboard',
-  label: 'Computer keyboard',
+  label: 'Keyboard',
   hint: 'Bottom two rows are white keys; the row above each plays the sharps.',
 
   /**

@@ -80,14 +80,19 @@ for (const { value, label } of skins) {
       sidebarW: cs('#patch-list', 'width'),
       mainDir: cs('#main', 'flexDirection'),
       pianoH: cs('#piano', 'height'),
+      // Truncation check. The toolbar gained an Input picker after the skins
+      // were designed, and #status is the flex-1 element that gives way first.
+      // A skin whose toolbar is too greedy shows "r.." where the status was.
+      statusPx: (() => document.getElementById('status').clientWidth)(),
     };
   });
 
   const file = join(OUT_DIR, `${value}.png`);
   await page.screenshot({ path: file });
   console.log(`${label.padEnd(16)} bg=${probe.bodyBg.padEnd(22)} ` +
-    `font=${probe.bodyFont.padEnd(12)} radius=${probe.toolbarRadius.padEnd(8)} ` +
-    `side=${probe.sidebarW.padEnd(7)} dir=${probe.mainDir.padEnd(12)} piano=${probe.pianoH}`);
+    `font=${probe.bodyFont.padEnd(12)} side=${probe.sidebarW.padEnd(7)} ` +
+    `dir=${probe.mainDir.padEnd(12)} piano=${probe.pianoH.padEnd(6)} ` +
+    `status=${probe.statusPx}px${probe.statusPx < 80 ? '  <-- TOO NARROW' : ''}`);
 }
 
 console.log(`\n-> ${OUT_DIR}`);
