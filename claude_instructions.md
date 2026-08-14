@@ -556,7 +556,7 @@ ship remains GPLv3 as a whole and must carry source.
 - Unmounting the mode discards the song; signal's own localStorage autosave
   brings it back on the next mount.
 
-## 15. Macros and MIDI controllers (not yet wired)
+## 15. Macros and MIDI controllers
 
 Surge already has per-patch assignable knobs: **8 Macros**, renamed by each
 patch (a loaded patch shows "How Messy?", "Ring Mod" and so on), plus Pitch

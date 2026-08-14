@@ -332,6 +332,21 @@ extern "C"
         gSynth->channelController(static_cast<char>(channel), cc, value);
     }
 
+    /*
+     * Command. Sets macro `i` to `value` in 0..1, on the sounding engine.
+     *
+     * Mirrors sgui_set_macro. Macros are parameters, so the GUI instance's copy
+     * is diffed across each frame anyway -- but sending here too means the sound
+     * changes on the same frame as the knob rather than the next one.
+     */
+    EMSCRIPTEN_KEEPALIVE
+    void sh_set_macro(int i, float value)
+    {
+        if (!gSynth || i < 0 || i >= n_customcontrollers)
+            return;
+        gSynth->setMacroParameter01(i, value);
+    }
+
     /* Command. Silences every sounding voice. Used on focus loss. */
     EMSCRIPTEN_KEEPALIVE
     void sh_all_notes_off()

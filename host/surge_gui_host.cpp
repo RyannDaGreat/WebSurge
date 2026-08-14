@@ -384,6 +384,94 @@ extern "C"
      * a patch load proves idle() is either not running or bailing out of its
      * `editor_open && frame && !halt_engine` guard.
      */
+    /*
+     * Command. MIDI pitch bend, on the GUI's own synth.
+     *
+     * Sound comes from the engine in the worklet, so why send it here too?
+     * Because this instance owns the parameter state that the panel draws and
+     * that gets diffed to the worklet every frame. A controller that moved only
+     * the engine would be invisible in the modulation display, and any macro it
+     * drove would be fought over by the next parameter diff.
+     *
+     * Same reasoning as patch loads, which also go to both.
+     */
+    EMSCRIPTEN_KEEPALIVE
+    void sgui_pitch_bend (int channel, int value)
+    {
+        if (! gProcessor)
+            return;
+        gProcessor->surge->pitchBend (static_cast<char> (channel), value);
+    }
+
+    /* Command. MIDI continuous controller, on the GUI's own synth. */
+    EMSCRIPTEN_KEEPALIVE
+    void sgui_cc (int channel, int cc, int value)
+    {
+        if (! gProcessor)
+            return;
+        gProcessor->surge->channelController (static_cast<char> (channel), cc, value);
+    }
+
+    /*
+     * Command. Sets macro `i` to `value` in 0..1.
+     *
+     * This is the real way to move a macro, and it is NOT a MIDI CC. An earlier
+     * version sent CC 41-48 on the assumption that Surge maps those by default;
+     * it does not. Nothing was mapped, so the knobs moved and no parameter
+     * changed -- measured as 0 of 766 parameters differing.
+     *
+     * Macros are what a hardware synth's assignable knobs are: per-patch named
+     * modulation sources (see sgui_macro_name), routed by the patch's own
+     * modulation matrix.
+     */
+    EMSCRIPTEN_KEEPALIVE
+    void sgui_set_macro (int i, float value)
+    {
+        if (! gProcessor || i < 0 || i >= n_customcontrollers)
+            return;
+        gProcessor->surge->setMacroParameter01 (i, value);
+    }
+
+    /*
+     * Query. Macro `i`'s TARGET value, 0..1.
+     *
+     * The target, not getMacroParameter01(). That one returns the modulation
+     * source's smoothed OUTPUT, which only advances while the synth processes
+     * audio -- and this instance never calls process(), the engine in the worklet
+     * does. So the output here sits at 0 forever no matter what is set, and
+     * reading it made a freshly-set macro read back as 0.000.
+     *
+     * The target is what the knob was moved to, available immediately, and is
+     * what should be both displayed and forwarded. The engine smooths toward it.
+     */
+    EMSCRIPTEN_KEEPALIVE
+    float sgui_get_macro (int i)
+    {
+        if (! gProcessor || i < 0 || i >= n_customcontrollers)
+            return 0.0f;
+        return gProcessor->surge->getMacroParameterTarget01 (i);
+    }
+
+    /*
+     * Query. The patch's own name for macro `i`, or "" if out of range.
+     *
+     * Patches rename these -- a loaded patch shows "How Messy?" rather than
+     * "Macro 3" -- which is exactly the per-preset knob assignment a hardware
+     * synth gives you. Exposed so the browser chrome can label real controls
+     * instead of numbering them.
+     */
+    EMSCRIPTEN_KEEPALIVE
+    const char *sgui_macro_name (int i)
+    {
+        if (! gProcessor || i < 0 || i >= n_customcontrollers)
+            return "";
+        return gProcessor->surge->storage.getPatch().CustomControllerLabel[i];
+    }
+
+    /* Query. How many macros this Surge build has. */
+    EMSCRIPTEN_KEEPALIVE
+    int sgui_macro_count() { return n_customcontrollers; }
+
     EMSCRIPTEN_KEEPALIVE
     int sgui_dbg_refresh_pending()
     {

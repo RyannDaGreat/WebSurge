@@ -169,6 +169,7 @@ class SurgeProcessor extends AudioWorkletProcessor {
       allNotesOff: c('sh_all_notes_off', null, []),
       pitchBend: c('sh_pitch_bend', null, ['number', 'number']),
       cc: c('sh_cc', null, ['number', 'number', 'number']),
+      setMacro: c('sh_set_macro', null, ['number', 'number']),
       setParam: c('sh_set_param', null, ['number', 'number']),
       getParam: c('sh_get_param', 'number', ['number']),
       paramDisplay: c('sh_param_display', 'string', ['number']),
@@ -220,6 +221,7 @@ class SurgeProcessor extends AudioWorkletProcessor {
       case 'allNotesOff': sh.allNotesOff(); break;
       case 'pitchBend': sh.pitchBend(msg.channel | 0, msg.value | 0); break;
       case 'cc': sh.cc(msg.channel | 0, msg.cc | 0, msg.value | 0); break;
+      case 'setMacro': sh.setMacro(msg.index | 0, msg.value); break;
       case 'setParam': sh.setParam(msg.index | 0, msg.value); break;
 
       case 'loadPatchPath': {

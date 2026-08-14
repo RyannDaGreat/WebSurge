@@ -34,6 +34,8 @@ import {
   unpackInto, writeFileInto, SURGE_DATA_ROOT,
 } from './surge-data.js';
 import { createPiano } from './piano.js';
+import { createWheels } from './wheels.js';
+import { attachWebMidi } from './webmidi.js';
 
 const GUI_MODULE = './surge-gui.js';
 const WORKLET_BUNDLE = 'js/surge-worklet-bundle.js';
@@ -46,6 +48,10 @@ const DATA_PATH = SURGE_DATA_ROOT;
 const INPUT_MODES = [keyboardMode, pianoRollMode, notationMode, signalMode];
 
 const $ = (id) => document.getElementById(id);
+
+/** Pure function. One line describing what MIDI inputs were found. */
+const text0 = (midi) =>
+  `Web MIDI: ${midi.names.length ? midi.names.join(', ') : 'no devices attached'}`;
 const setStatus = (m) => { $('status').textContent = m; };
 
 /**
@@ -138,6 +144,12 @@ class SurgeGuiApp {
       paramCount: c('sgui_param_count', 'number', []),
       readParams: c('sgui_read_params', null, ['number']),
       loadPatch: c('sgui_load_patch_path', 'number', ['string', 'string']),
+      pitchBend: c('sgui_pitch_bend', null, ['number', 'number']),
+      cc: c('sgui_cc', null, ['number', 'number', 'number']),
+      macroName: c('sgui_macro_name', 'string', ['number']),
+      setMacro: c('sgui_set_macro', null, ['number', 'number']),
+      getMacro: c('sgui_get_macro', 'number', ['number']),
+      macroCount: c('sgui_macro_count', 'number', []),
       setScale: c('sgui_set_scale', null, ['number']),
       getScale: c('sgui_get_scale', 'number', []),
       patchCount: c('sgui_patch_count', 'number', []),
@@ -282,6 +294,35 @@ class SurgeGuiApp {
         this.node.port.postMessage({ type: 'setParam', index: i, value: cur[i] });
       }
     }
+
+    this.syncMacros();
+  }
+
+  /**
+   * Command. Sends macros that moved in the GUI to the audio engine.
+   *
+   * SEPARATE FROM syncParams FOR A REASON. Macros are modulation SOURCES, not
+   * parameters, so they are not in the 766-entry block at all and the parameter
+   * diff cannot see them.
+   *
+   * The consequence went unnoticed until macros got a control of their own:
+   * dragging Macro 1 on Surge's own panel moved the GUI instance and never
+   * reached the engine, so it changed the display and not the sound. Eight
+   * floats a frame, diffed, fixes that as well as the knobs in the toolbar.
+   */
+  syncMacros() {
+    if (this.macroCount === undefined) {
+      this.macroCount = this.sg.macroCount();
+      this.lastMacros = new Float32Array(this.macroCount).fill(NaN);
+    }
+
+    for (let i = 0; i < this.macroCount; i++) {
+      const value = this.sg.getMacro(i);
+      if (value !== this.lastMacros[i]) {
+        this.lastMacros[i] = value;
+        this.node.port.postMessage({ type: 'setMacro', index: i, value });
+      }
+    }
   }
 
   /** Command. Routes canvas pointer/key events into Surge. */
@@ -400,8 +441,25 @@ class SurgeGuiApp {
       noteOn: (note, velocity) => this.noteOn(note, velocity),
       noteOff: (note) => this.noteOff(note),
       allNotesOff: () => this.panic(),
+      pitchBend: (channel, value) => this.pitchBend(channel, value),
+      cc: (channel, cc, value) => this.cc(channel, cc, value),
+      macro: (index, value) => this.setMacro(index, value),
       setModeStatus: (text) => { $('kb-state').textContent = text; },
     };
+
+    // Expressive controls. After the synth exists, since the macro labels are
+    // read back from the loaded patch.
+    this.wheels = createWheels($('wheels'), this.io, this.sg);
+
+    // Hardware MIDI is attached once and stays attached, alongside whatever mode
+    // is active -- a keyboard should work while a sequence plays, as on hardware.
+    // Absent Web MIDI is the normal case, not a failure; a REFUSAL is reported.
+    attachWebMidi(this.io, (text) => { this.midiStatus = text; })
+      .then((midi) => {
+        this.midi = midi;
+        console.info(midi.supported ? text0(midi) : 'Web MIDI unavailable in this browser');
+      })
+      .catch((err) => fail('MIDI input was refused', err));
 
     this.modes = createModeRegistry(INPUT_MODES, this.io, $('mode-panel'));
 
@@ -541,6 +599,55 @@ class SurgeGuiApp {
     this.piano?.setHeld(note, true);
   }
 
+  /**
+   * Command. Pitch bend, to both Surge instances.
+   *
+   * Both, for the same reason patch loads go to both: the worklet copy makes the
+   * sound, and the GUI copy owns the parameter state the panel draws and that is
+   * diffed across each frame. Sending to only one either makes a silent change
+   * or a visible one that does not sound.
+   *
+   * @param {number} channel - 0..15
+   * @param {number} value - signed, 0 is centre
+   */
+  pitchBend(channel, value) {
+    this.node?.port.postMessage({ type: 'pitchBend', channel, value });
+    this.sg?.pitchBend(channel, value);
+  }
+
+  /**
+   * Command. Continuous controller, to both Surge instances.
+   *
+   * The controller number is passed through untranslated. Surge's own modulation
+   * matrix decides what CC 1 does in this patch, which is the whole point of
+   * per-patch macro assignment -- interpreting it here would override the patch.
+   *
+   * @param {number} channel - 0..15
+   * @param {number} cc - controller number
+   * @param {number} value - 0..127
+   */
+  cc(channel, cc, value) {
+    this.node?.port.postMessage({ type: 'cc', channel, cc, value });
+    this.sg?.cc(channel, cc, value);
+  }
+
+  /**
+   * Command. Moves macro `index` to `value` in 0..1, on both instances.
+   *
+   * Not a MIDI CC. Surge does not map CC 41-48 to macros by default -- an
+   * earlier version assumed it did, and the knobs moved while not one of the 766
+   * parameters changed. setMacroParameter01 is the actual API.
+   *
+   * @param {number} index - 0..7
+   * @param {number} value - 0..1
+   */
+  setMacro(index, value) {
+    // Only the GUI instance. syncMacros() carries it across on the next frame,
+    // which is the same path an on-canvas macro drag now takes -- one route
+    // rather than two that could disagree.
+    this.sg?.setMacro(index, value);
+  }
+
   /** Command. Releases a note and unlights its key. */
   noteOff(note) {
     this.node?.port.postMessage({ type: 'noteOff', channel: 0, key: note, velocity: 0 });
@@ -590,6 +697,7 @@ class SurgeGuiApp {
       this.node?.port.postMessage({ type: 'loadPatchPath', path: entry.path, name: entry.name });
 
       this.sg.invalidate();
+      this.wheels?.refresh();   // macro names belong to the patch
       setStatus(ok ? `Patch: ${entry.name}` : `Surge refused patch: ${entry.name}`);
       if (!ok) fail(`Surge refused the patch "${entry.name}"`);
     } catch (err) {

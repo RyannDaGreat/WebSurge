@@ -142,6 +142,11 @@
 <div id="mode-panel"
      class="shrink-0 max-h-[45vh] overflow-auto border-t border-current/15 bg-current/5 empty:hidden"></div>
 
+<!-- Expressive controls: pitch bend, mod wheel, and the patch's own 8 macros.
+     Outside #stage so they stay reachable while an editor is open. Classes are
+     `current`-relative so they read correctly on every skin. -->
+<div id="wheels" class="shrink-0 border-t border-current/15 px-3 py-2"></div>
+
 <div id="piano" title="All 128 MIDI notes. Click or drag to play."></div>
 
 <!-- The keyboard legend. Empty here on purpose: its contents are generated from

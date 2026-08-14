@@ -27,8 +27,11 @@ const BASE_URL = process.argv[2] || 'http://127.0.0.1:8899/index.html';
 
 /** Instantiating a 19 MB wasm module is not instant. */
 const READY_TIMEOUT_MS = 120000;
-/** Enough for a mode to mount, including the lazy-loaded ones. */
-const MOUNT_MS = 1500;
+/** Longest a mode may take to mount, including the lazy-loaded ones. */
+const MOUNT_MS = 8000;
+
+/** Grace after mounting, since a mode can mount and then throw. */
+const SETTLE_MS = 600;
 
 /**
  * Console noise that is known, understood, and not ours.
@@ -82,10 +85,23 @@ for (const skin of skins) {
   for (const mode of modes) {
     errors.length = 0;
 
-    // setInputMode catches and reports rather than throwing, so the error bar
-    // is the honest signal -- an exception here would be too kind.
-    await page.evaluate((m) => window.__app.setInputMode(m), mode);
-    await new Promise((r) => setTimeout(r, MOUNT_MS));
+    // Fire without awaiting the page-side promise. Awaiting it across signal's
+    // iframe teardown makes CDP drop the handle ("Promise was collected"), which
+    // is a harness flake and reads exactly like a product failure. Start it, then
+    // poll the state the app actually exposes.
+    //
+    // setInputMode catches and reports rather than throwing, so the error bar is
+    // the honest signal -- an exception here would be too kind.
+    await page.evaluate((m) => { window.__app.setInputMode(m); }, mode);
+
+    const deadline = Date.now() + MOUNT_MS;
+    for (;;) {
+      const at = await page.evaluate(() => window.__app.modes.activeId());
+      if (at === mode || Date.now() > deadline) break;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    // Settle: a mode can mount and then throw while initialising.
+    await new Promise((r) => setTimeout(r, SETTLE_MS));
 
     const bar = await page.$eval('#error-bar', (el) => (el.hidden ? '' : el.textContent));
     const mounted = await page.evaluate(() => window.__app.modes.activeId());
